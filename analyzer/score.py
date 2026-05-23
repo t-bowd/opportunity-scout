@@ -10,7 +10,7 @@ from google.genai import types
 from db.client import get_client, insert_opportunity, get_unprocessed_signals
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-MODEL = "gemini-2.0-flash-001"
+MODEL = "gemini-2.5-flash"
 
 MIN_SCORE_TO_ALERT = 14  # out of 20; triggers immediate email
 
