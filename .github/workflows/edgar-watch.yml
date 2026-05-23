@@ -1,11 +1,10 @@
 name: EDGAR Watcher
 
 on:
-  schedule:
-    # Every hour during NYSE hours: 14:00-21:00 UTC (Mon-Fri)
-    # Can't express "only 14-21" in a single cron — workflow runs all day but
-    # is cheap (< 2 min/run). Adjust if Actions minutes become a concern.
-    - cron: "0 * * * 1-5"
+  # Disabled until Gemini quota situation is resolved — daily workflow handles
+  # classification. Re-enable the cron below once quota is confirmed stable.
+  # schedule:
+  #   - cron: "0 * * * 1-5"
   workflow_dispatch:
 
 jobs:

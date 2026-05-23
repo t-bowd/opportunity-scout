@@ -1,5 +1,5 @@
 """
-Classifies unprocessed signals using Gemini 2.0 Flash (free tier).
+Classifies unprocessed signals using Gemini 1.5 Flash (free tier).
 Extracts: pattern type, entity name/ticker, summary, urgency.
 """
 import json
@@ -9,7 +9,7 @@ import google.generativeai as genai
 from db.client import get_unprocessed_signals, mark_signal_processed
 
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-2.0-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 PATTERNS = [
     "pre_ipo_proxy",   # vehicle providing exposure to a private company pre-IPO
@@ -46,23 +46,33 @@ Be conservative — if you can't identify a clear pattern, use "irrelevant".
 """
 
 
-def classify_signal(signal: dict) -> dict | None:
+def classify_signal(signal: dict, retries: int = 3) -> dict | None:
     raw = json.dumps(signal["raw_data"], default=str)[:3000]  # token guard
     prompt = f"Source: {signal['source']}\nDate: {signal['signal_date']}\n\nRaw data:\n{raw}"
 
-    try:
-        resp = model.generate_content(
-            [SYSTEM_PROMPT, prompt],
-            generation_config={"temperature": 0.1, "response_mime_type": "application/json"},
-        )
-        return json.loads(resp.text)
-    except Exception as e:
-        print(f"[classify] error for signal {signal['id']}: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            resp = model.generate_content(
+                [SYSTEM_PROMPT, prompt],
+                generation_config={"temperature": 0.1, "response_mime_type": "application/json"},
+            )
+            return json.loads(resp.text)
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg:
+                wait = 60 * (attempt + 1)  # 60s, 120s, 180s
+                print(f"[classify] rate limited, waiting {wait}s before retry {attempt + 1}/{retries}")
+                time.sleep(wait)
+            else:
+                print(f"[classify] error for signal {signal['id']}: {e}")
+                return None
+
+    print(f"[classify] gave up on signal {signal['id']} after {retries} retries")
+    return None
 
 
-def run() -> int:
-    signals = get_unprocessed_signals(limit=50)
+def run(limit: int = 30) -> int:
+    signals = get_unprocessed_signals(limit=limit)
     classified = 0
 
     for signal in signals:
@@ -75,8 +85,8 @@ def run() -> int:
         mark_signal_processed(signal["id"], summary, pattern)
         classified += 1
 
-        # Gemini free tier: 15 RPM — stay under it
-        time.sleep(4)
+        # Gemini free tier: 15 RPM — stay well under it
+        time.sleep(5)
 
     print(f"[classify] classified {classified} signals")
     return classified

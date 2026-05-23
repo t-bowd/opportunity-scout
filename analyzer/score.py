@@ -9,7 +9,7 @@ import google.generativeai as genai
 from db.client import get_client, insert_opportunity, get_unprocessed_signals
 
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-2.0-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 MIN_SCORE_TO_ALERT = 14  # out of 20; triggers immediate email
 
