@@ -1,0 +1,33 @@
+name: EDGAR Watcher
+
+on:
+  schedule:
+    # Every hour during NYSE hours: 14:00-21:00 UTC (Mon-Fri)
+    # Can't express "only 14-21" in a single cron — workflow runs all day but
+    # is cheap (< 2 min/run). Adjust if Actions minutes become a concern.
+    - cron: "0 * * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check EDGAR for high-urgency filings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          DIGEST_EMAIL: ${{ secrets.DIGEST_EMAIL }}
+          EDGAR_USER_AGENT: ${{ secrets.EDGAR_USER_AGENT }}
+        run: python run_edgar_watch.py
