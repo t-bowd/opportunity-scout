@@ -16,7 +16,7 @@ from google.genai import types
 from db.client import get_unprocessed_signals, mark_signal_processed
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.0-flash-001"
 
 # These sources have pattern already set by the collector — no LLM needed
 RULE_BASED_SOURCES = {
