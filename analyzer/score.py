@@ -5,11 +5,12 @@ Runs after classify.py has processed the day's signals.
 import json
 import os
 from datetime import date, timedelta
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from db.client import get_client, insert_opportunity, get_unprocessed_signals
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+MODEL = "gemini-2.0-flash"
 
 MIN_SCORE_TO_ALERT = 14  # out of 20; triggers immediate email
 
@@ -91,9 +92,13 @@ def score_week(week_of: str | None = None) -> list[str]:
     prompt = f"Week of {week_of}. Signals collected this week:\n\n{summaries}\n\nIdentify the top 5 most actionable opportunities and score each."
 
     try:
-        resp = model.generate_content(
-            [SCORING_PROMPT, prompt],
-            generation_config={"temperature": 0.2},
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                system_instruction=SCORING_PROMPT,
+            ),
         )
         raw = resp.text.strip()
         # Gemini may return a list of objects or a single object

@@ -1,15 +1,16 @@
 """
-Classifies unprocessed signals using Gemini 1.5 Flash (free tier).
+Classifies unprocessed signals using Gemini 2.0 Flash via the new google-genai SDK.
 Extracts: pattern type, entity name/ticker, summary, urgency.
 """
 import json
 import os
 import time
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from db.client import get_unprocessed_signals, mark_signal_processed
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+MODEL = "gemini-2.0-flash"
 
 PATTERNS = [
     "pre_ipo_proxy",   # vehicle providing exposure to a private company pre-IPO
@@ -52,16 +53,21 @@ def classify_signal(signal: dict, retries: int = 3) -> dict | None:
 
     for attempt in range(retries):
         try:
-            resp = model.generate_content(
-                [SYSTEM_PROMPT, prompt],
-                generation_config={"temperature": 0.1, "response_mime_type": "application/json"},
+            resp = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    system_instruction=SYSTEM_PROMPT,
+                ),
             )
             return json.loads(resp.text)
         except Exception as e:
             msg = str(e)
             if "429" in msg:
-                wait = 60 * (attempt + 1)  # 60s, 120s, 180s
-                print(f"[classify] rate limited, waiting {wait}s before retry {attempt + 1}/{retries}")
+                wait = 60 * (attempt + 1)
+                print(f"[classify] rate limited, waiting {wait}s (attempt {attempt + 1}/{retries})")
                 time.sleep(wait)
             else:
                 print(f"[classify] error for signal {signal['id']}: {e}")
@@ -85,8 +91,7 @@ def run(limit: int = 30) -> int:
         mark_signal_processed(signal["id"], summary, pattern)
         classified += 1
 
-        # Gemini free tier: 15 RPM — stay well under it
-        time.sleep(5)
+        time.sleep(5)  # stay under 15 RPM free tier limit
 
     print(f"[classify] classified {classified} signals")
     return classified
