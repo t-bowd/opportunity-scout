@@ -5,7 +5,13 @@ Runs Sunday evening AEST.
 import os
 import resend
 from datetime import date, timedelta
-from db.client import get_top_opportunities, insert_feedback_rows
+from db.client import (
+    get_top_opportunities,
+    insert_feedback_rows,
+    get_open_paper_positions,
+    get_closed_paper_positions,
+    get_latest_paper_snapshot,
+)
 
 resend.api_key = os.environ["RESEND_API_KEY"]
 DIGEST_TO = os.environ["DIGEST_EMAIL"]
@@ -66,11 +72,129 @@ def _format_opportunity(opp: dict, rank: int) -> str:
     return "\n".join(lines)
 
 
+def _format_paper_section(week_of: str) -> str:
+    open_pos = get_open_paper_positions()
+    closed_pos = get_closed_paper_positions()
+    snap = get_latest_paper_snapshot()
+
+    # Closed trades from the last 7 days
+    cutoff = (date.fromisoformat(week_of) - timedelta(days=1)).isoformat()
+    recent_closed = [
+        p for p in closed_pos
+        if p.get("exit_date") and p["exit_date"] >= cutoff
+    ]
+
+    # --- Open positions table ---
+    if open_pos:
+        rows = ""
+        for p in open_pos:
+            entry_date = p.get("entry_date", "")
+            days_held = (date.today() - date.fromisoformat(entry_date)).days if entry_date else "?"
+            rows += (
+                f"<tr>"
+                f"<td style='padding:4px 12px 4px 0'><strong>{p['ticker']}</strong></td>"
+                f"<td style='padding:4px 12px 4px 0'>${float(p['entry_price_aud']):.2f}</td>"
+                f"<td style='padding:4px 12px 4px 0'>{days_held}d</td>"
+                f"<td style='padding:4px 12px 4px 0'>{p['score_at_entry']}/20</td>"
+                f"<td style='padding:4px 0'>{p['pattern'].replace('_', ' ').title()}</td>"
+                f"</tr>"
+            )
+        open_html = f"""
+<table style='font-size:13px;border-collapse:collapse;width:100%;'>
+  <tr style='color:#888;font-size:11px;'>
+    <th style='text-align:left;padding:4px 12px 4px 0'>Ticker</th>
+    <th style='text-align:left;padding:4px 12px 4px 0'>Entry (AUD)</th>
+    <th style='text-align:left;padding:4px 12px 4px 0'>Held</th>
+    <th style='text-align:left;padding:4px 12px 4px 0'>Score</th>
+    <th style='text-align:left;padding:4px 0'>Pattern</th>
+  </tr>
+  {rows}
+</table>"""
+    else:
+        open_html = "<p style='color:#888;font-size:13px;'>No open positions.</p>"
+
+    # --- Recent closes ---
+    if recent_closed:
+        close_rows = ""
+        for p in recent_closed:
+            pnl = float(p.get("pnl_aud") or 0)
+            pnl_pct = float(p.get("pnl_pct") or 0)
+            color = "#2a9d2a" if pnl >= 0 else "#cc3333"
+            reason = p.get("exit_reason", "").replace("_", " ").title()
+            close_rows += (
+                f"<tr>"
+                f"<td style='padding:4px 12px 4px 0'><strong>{p['ticker']}</strong></td>"
+                f"<td style='padding:4px 12px 4px 0;color:{color}'>{pnl_pct:+.1f}%</td>"
+                f"<td style='padding:4px 12px 4px 0;color:{color}'>${pnl:+.2f}</td>"
+                f"<td style='padding:4px 0;color:#888;font-size:12px'>{reason}</td>"
+                f"</tr>"
+            )
+        closes_html = f"""
+<h3 style='margin:16px 0 8px;'>Closed This Week</h3>
+<table style='font-size:13px;border-collapse:collapse;width:100%;'>
+  <tr style='color:#888;font-size:11px;'>
+    <th style='text-align:left;padding:4px 12px 4px 0'>Ticker</th>
+    <th style='text-align:left;padding:4px 12px 4px 0'>Return</th>
+    <th style='text-align:left;padding:4px 12px 4px 0'>P&amp;L (AUD)</th>
+    <th style='text-align:left;padding:4px 0'>Exit</th>
+  </tr>
+  {close_rows}
+</table>"""
+    else:
+        closes_html = ""
+
+    # --- Expectancy progress bar ---
+    if snap:
+        closed_count = snap.get("closed_trades", 0)
+        expectancy = snap.get("expectancy_aud")
+        win_rate = snap.get("win_rate")
+        total_pnl = snap.get("total_pnl_aud", 0)
+        needed = max(0, 20 - closed_count)
+
+        exp_str = f"${float(expectancy):+.2f}" if expectancy is not None else "n/a"
+        wr_str = f"{float(win_rate):.0f}%" if win_rate is not None else "n/a"
+        progress_pct = min(100, int(closed_count / 20 * 100))
+        bar_filled = round(progress_pct / 10)
+
+        stats_html = f"""
+<h3 style='margin:16px 0 8px;'>Expectancy Progress</h3>
+<p style='font-size:13px;'>
+  <strong>{closed_count}/20 trades</strong> completed
+  &nbsp;{"█" * bar_filled + "░" * (10 - bar_filled)}&nbsp;
+  {progress_pct}%
+</p>
+<p style='font-size:13px;color:#444;'>
+  Avg P&amp;L per trade: <strong>{exp_str} AUD</strong> &nbsp;|&nbsp;
+  Win rate: <strong>{wr_str}</strong> &nbsp;|&nbsp;
+  Total P&amp;L: <strong>${float(total_pnl):+.2f} AUD</strong>
+</p>
+<p style='font-size:12px;color:#888;'>
+  {needed} more trades needed before graduation review.
+  Positive expectancy across 20 trades = move to real money.
+</p>"""
+    else:
+        stats_html = "<p style='font-size:13px;color:#888;'>No trades yet — paper portfolio starting this week.</p>"
+
+    return f"""
+<hr style='border:none;border-top:2px solid #1a1a1a;margin:32px 0 16px;'>
+<h2 style='margin-bottom:4px;'>Paper Portfolio</h2>
+<p style='font-size:12px;color:#888;margin-top:0;'>
+  Simulated $200 AUD positions. Tracks whether these picks would make money before real money is deployed.
+</p>
+
+<h3 style='margin:16px 0 8px;'>Open Positions ({len(open_pos)}/5 slots)</h3>
+{open_html}
+{closes_html}
+{stats_html}
+"""
+
+
 def _build_html(opportunities: list[dict], week_of: str) -> str:
     opp_html = "\n<br>\n".join(
         _format_opportunity(o, i + 1) for i, o in enumerate(opportunities)
     )
     feedback_url = f"https://supabase.com/dashboard/project/{SUPABASE_PROJECT}/editor"
+    paper_html = _format_paper_section(week_of)
 
     return f"""
 <html>
@@ -89,6 +213,8 @@ def _build_html(opportunities: list[dict], week_of: str) -> str:
     <code>acted</code> (true/false) and <code>grade</code> (1–5) for each row.<br>
     Or run: <code>python grade.py --list</code> from the repo.
   </p>
+
+  {paper_html}
 
   <p style="font-size:11px; color:#999; border-top: 1px solid #eee; padding-top: 8px;">
     Not financial advice. This is a signal-identification tool. Do your own research before acting on any opportunity.

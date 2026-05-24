@@ -89,6 +89,81 @@ def insert_feedback_rows(opportunity_ids: list[str]) -> None:
     db.table("feedback").upsert(rows, on_conflict="opportunity_id").execute()
 
 
+# ---------------------------------------------------------------------------
+# Paper trading
+# ---------------------------------------------------------------------------
+
+def get_open_paper_positions() -> list[dict]:
+    db = get_client()
+    return (
+        db.table("paper_positions")
+        .select("*")
+        .eq("status", "open")
+        .order("entry_date", desc=False)
+        .execute()
+        .data
+    )
+
+
+def get_closed_paper_positions(limit: int = 200) -> list[dict]:
+    db = get_client()
+    return (
+        db.table("paper_positions")
+        .select("*")
+        .neq("status", "open")
+        .order("exit_date", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+def paper_position_exists_for_opportunity(opportunity_id: str) -> bool:
+    db = get_client()
+    result = (
+        db.table("paper_positions")
+        .select("id")
+        .eq("opportunity_id", opportunity_id)
+        .execute()
+    )
+    return len(result.data) > 0
+
+
+def insert_paper_position(pos: dict) -> str:
+    db = get_client()
+    result = db.table("paper_positions").insert(pos).execute()
+    return result.data[0]["id"]
+
+
+def close_paper_position(position_id: str, updates: dict) -> None:
+    db = get_client()
+    db.table("paper_positions").update(updates).eq("id", position_id).execute()
+
+
+def insert_paper_skipped(skip: dict) -> None:
+    db = get_client()
+    db.table("paper_skipped_entries").insert(skip).execute()
+
+
+def upsert_paper_snapshot(snap: dict) -> None:
+    db = get_client()
+    db.table("paper_portfolio_snapshots").upsert(snap, on_conflict="snapshot_date").execute()
+
+
+def get_latest_paper_snapshot() -> dict | None:
+    db = get_client()
+    result = (
+        db.table("paper_portfolio_snapshots")
+        .select("*")
+        .order("snapshot_date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+# ---------------------------------------------------------------------------
+
 def get_feedback_pending_pnl() -> list[dict]:
     """Opportunities needing 30/90d price checks."""
     from datetime import date, timedelta

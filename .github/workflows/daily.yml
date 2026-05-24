@@ -2,8 +2,8 @@ name: Daily Collection
 
 on:
   schedule:
-    # 06:00 AEST = 20:00 UTC (accounts for AEST UTC+10)
-    - cron: "0 20 * * 1-5"
+    # 06:00 AEST = 20:00 UTC — runs 7 days/week to catch weekend news + paper exits
+    - cron: "0 20 * * *"
   workflow_dispatch:  # allow manual trigger
 
 jobs:
