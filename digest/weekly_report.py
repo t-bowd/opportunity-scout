@@ -49,21 +49,18 @@ def _format_opportunity(opp: dict, rank: int) -> str:
         f"Price when spotted: {price_str}"
         f"</p>",
 
-        # Detail block — for those who want to dig in
-        f"<details style='margin-top:8px;'>",
-        f"<summary style='cursor:pointer;font-size:13px;color:#666;'>Show detail</summary>",
-        f"<div style='margin-top:12px;font-size:13px;color:#333;'>",
+        # Detail block — smaller, muted, for those who want to dig in
+        f"<div style='margin-top:12px;font-size:13px;color:#555;'>",
         f"<p><strong>Full thesis:</strong> {opp.get('thesis', '')}</p>",
         f"<p><strong>What triggers it:</strong> {opp.get('catalyst', 'n/a')}</p>",
         f"<p><strong>What kills it:</strong> {opp.get('invalidation', 'n/a')}</p>",
-        f"<table style='font-size:12px;color:#666;margin-top:8px;border-collapse:collapse;'>",
+        f"<table style='font-size:12px;color:#888;margin-top:8px;border-collapse:collapse;'>",
         f"<tr><td style='padding:2px 16px 2px 0'>Conviction</td><td>{opp.get('conviction')}/5</td></tr>",
         f"<tr><td style='padding:2px 16px 2px 0'>Asymmetry</td><td>{opp.get('asymmetry')}/5</td></tr>",
         f"<tr><td style='padding:2px 16px 2px 0'>Liquidity</td><td>{opp.get('liquidity')}/5</td></tr>",
         f"<tr><td style='padding:2px 16px 2px 0'>Timing</td><td>{opp.get('timing')}/5</td></tr>",
         f"</table>",
         f"</div>",
-        f"</details>",
         f"<hr style='border:none;border-top:1px solid #eee;margin:24px 0;'>",
     ]
     return "\n".join(lines)
