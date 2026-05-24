@@ -4,48 +4,58 @@ Runs after classify.py has processed the day's signals.
 """
 import json
 import os
+import re
 from datetime import date, timedelta
 from google import genai
 from google.genai import types
-from db.client import get_client, insert_opportunity, get_unprocessed_signals
+from db.client import get_client, insert_opportunity
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = "gemini-2.5-flash"
-
-MIN_SCORE_TO_ALERT = 14  # out of 20; triggers immediate email
 
 PATTERNS_TO_SCORE = {
     "pre_ipo_proxy", "thematic_etf", "s1_filed",
     "insider_buy", "activist", "smart_money", "spin_off",
 }
 
-SCORING_PROMPT = """You are scoring a stock market opportunity for a retail investor.
+SCORING_PROMPT = """You are scoring stock market opportunities for a retail investor.
+
+You will receive a list of signals collected this week from SEC filings and news.
+Identify the top 5 most actionable opportunities and score each.
 
 Score each dimension 0-5:
-- conviction: How many independent signals support this? (0=one weak signal, 5=multiple strong signals)
-- asymmetry: What is the upside/downside ratio given the catalyst? (0=symmetric, 5=highly asymmetric upside)
-- liquidity: Can a retail investor actually trade this? (0=private/illiquid, 5=high-volume public market)
-- timing: Is the catalyst dated and near-term? (0=open-ended/years away, 5=specific event within 4 weeks)
+- conviction: How many independent signals support this?
+- asymmetry: What is the upside/downside ratio given the catalyst?
+- liquidity: Can a retail investor actually trade this?
+- timing: Is the catalyst dated and near-term?
 
-Also write:
-- vehicle: the specific ticker to trade (must be publicly tradeable)
-- thesis: 3-4 sentences explaining the opportunity
-- catalyst: what event or development triggers the move
-- invalidation: what would make you exit the position
+Respond with a JSON array of exactly 5 objects:
+[
+  {
+    "conviction": 3,
+    "asymmetry": 4,
+    "liquidity": 5,
+    "timing": 2,
+    "vehicle": "TICKER",
+    "thesis": "3-4 sentences explaining the opportunity.",
+    "catalyst": "What triggers the move.",
+    "invalidation": "What would make you exit.",
+    "catalyst_date": "YYYY-MM-DD or null"
+  }
+]
 
-Respond ONLY with valid JSON:
-{
-  "conviction": 0-5,
-  "asymmetry": 0-5,
-  "liquidity": 0-5,
-  "timing": 0-5,
-  "vehicle": "TICKER",
-  "thesis": "...",
-  "catalyst": "...",
-  "invalidation": "...",
-  "catalyst_date": "YYYY-MM-DD or null"
-}
+Return ONLY the JSON array. No markdown, no explanation, no code fences.
 """
+
+
+def _extract_json(text: str) -> str:
+    """Strip markdown code fences if present, return raw JSON string."""
+    text = text.strip()
+    # Remove ```json ... ``` or ``` ... ```
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if match:
+        return match.group(1).strip()
+    return text
 
 
 def _fetch_week_signals(week_of: str) -> list[dict]:
@@ -89,7 +99,7 @@ def score_week(week_of: str | None = None) -> list[str]:
         for s in signals
     )
 
-    prompt = f"Week of {week_of}. Signals collected this week:\n\n{summaries}\n\nIdentify the top 5 most actionable opportunities and score each."
+    prompt = f"Week of {week_of}. Signals:\n\n{summaries}"
 
     try:
         resp = client.models.generate_content(
@@ -97,15 +107,18 @@ def score_week(week_of: str | None = None) -> list[str]:
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.2,
+                response_mime_type="application/json",
                 system_instruction=SCORING_PROMPT,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
-        raw = resp.text.strip()
-        # Gemini may return a list of objects or a single object
-        if raw.startswith("["):
-            opportunities = json.loads(raw)
-        else:
-            opportunities = [json.loads(raw)]
+        raw = _extract_json(resp.text or "")
+        if not raw:
+            print("[score] empty response from Gemini")
+            return []
+        opportunities = json.loads(raw)
+        if isinstance(opportunities, dict):
+            opportunities = [opportunities]
     except Exception as e:
         print(f"[score] Gemini error: {e}")
         return []
