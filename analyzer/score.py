@@ -109,7 +109,6 @@ def score_week(week_of: str | None = None) -> list[str]:
                 temperature=0.2,
                 response_mime_type="application/json",
                 system_instruction=SCORING_PROMPT,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = _extract_json(resp.text or "")
