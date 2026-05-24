@@ -20,23 +20,27 @@ PATTERNS_TO_SCORE = {
 
 SCORING_PROMPT = """You are scoring stock market opportunities for a retail investor.
 
-You will receive a list of signals collected this week from SEC filings and news.
-Identify the top 5 most actionable opportunities and score each.
+You will receive signals from SEC filings (Form 4 insider buys, S-1 IPOs, 13F institutional holdings, 13D activist stakes) and financial news.
+
+Each signal names a real company. Your job:
+1. Identify the top 5 most actionable opportunities from the signals
+2. For each, use the REAL NYSE or NASDAQ ticker symbol for that company — look it up from your training data. Do NOT invent placeholder names like "INSIDERCO" or "DUALPLAY".
+3. Score each opportunity
 
 Score each dimension 0-5:
 - conviction: How many independent signals support this?
 - asymmetry: What is the upside/downside ratio given the catalyst?
-- liquidity: Can a retail investor actually trade this?
+- liquidity: Can a retail investor actually trade this? (if no ticker known, score 0)
 - timing: Is the catalyst dated and near-term?
 
-Respond with a JSON array of exactly 5 objects:
+Respond with a JSON array of up to 5 objects:
 [
   {
     "conviction": 3,
     "asymmetry": 4,
     "liquidity": 5,
     "timing": 2,
-    "vehicle": "TICKER",
+    "vehicle": "REAL_TICKER",
     "thesis": "3-4 sentences explaining the opportunity.",
     "catalyst": "What triggers the move.",
     "invalidation": "What would make you exit.",

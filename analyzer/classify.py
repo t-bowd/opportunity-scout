@@ -60,18 +60,40 @@ def _rule_based_summary(signal: dict) -> str:
     """Generate a plain summary for EDGAR signals without calling Gemini."""
     raw = signal.get("raw_data", {})
     source = signal.get("source", "")
-    entity = raw.get("entity_name", raw.get("companyName", "Unknown entity"))
-    date = signal.get("signal_date", "")
+    entity = raw.get("entity_name", "Unknown")
+    filing_date = signal.get("signal_date", "")
 
     summaries = {
-        "edgar_4":      f"Insider transaction filed for {entity} on {date}.",
-        "edgar_s1":     f"{entity} filed an S-1 registration statement on {date}, indicating a planned IPO.",
-        "edgar_13f_hr": f"Institutional holdings report (13F) filed by {entity} on {date}.",
-        "edgar_13d":    f"Activist stake (13D) filed in {entity} on {date}.",
-        "edgar_n1a":    f"New ETF registration (N-1A) filed by {entity} on {date}.",
-        "etf_launch":   f"New ETF launched: {raw.get('title', entity)} on {date}.",
+        "edgar_4":      (
+            f"SEC Form 4 insider transaction filed on {filing_date}. "
+            f"Company: {entity}. An executive or director bought or sold shares on the open market. "
+            f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
+        ),
+        "edgar_s1":     (
+            f"SEC S-1 IPO registration filed by {entity} on {filing_date}. "
+            f"This company is planning to go public. "
+            f"Use the real NYSE/NASDAQ ticker for {entity} if already assigned, otherwise note as pre-IPO."
+        ),
+        "edgar_13f_hr": (
+            f"SEC 13F institutional holdings report filed by {entity} on {filing_date}. "
+            f"This fund disclosed its quarterly equity positions. "
+            f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
+        ),
+        "edgar_13d":    (
+            f"SEC 13D activist filing on {filing_date}. "
+            f"An activist investor has taken a significant stake in {entity}. "
+            f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
+        ),
+        "edgar_n1a":    (
+            f"SEC N-1A new ETF registration filed by {entity} on {filing_date}. "
+            f"A new fund is being registered. Use the real ticker once assigned."
+        ),
+        "etf_launch":   (
+            f"New ETF launched: {raw.get('title', entity)} on {filing_date}. "
+            f"Use the real NYSE/NASDAQ ticker when scoring."
+        ),
     }
-    return summaries.get(source, f"Signal from {source} on {date}.")
+    return summaries.get(source, f"Signal from {source} for {entity} on {filing_date}.")
 
 
 def classify_signal_with_llm(signal: dict) -> dict | None:
