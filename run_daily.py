@@ -9,7 +9,7 @@ from analyzer import classify, score
 
 print("=== Daily collection run ===")
 
-edgar.collect(lookback_days=1)
+edgar.collect(lookback_days=7)
 etf_launches.collect()
 news.collect()
 
