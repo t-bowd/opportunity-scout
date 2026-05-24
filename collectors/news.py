@@ -8,18 +8,28 @@ from datetime import date, timedelta, datetime
 from db.client import insert_signal
 
 FEEDS = [
+    # US feeds
     ("reuters_business",  "https://feeds.reuters.com/reuters/businessNews"),
     ("marketwatch_top",   "https://feeds.marketwatch.com/marketwatch/topstories/"),
     ("seeking_alpha",     "https://seekingalpha.com/market_currents.xml"),
     ("yahoo_finance",     "https://finance.yahoo.com/news/rssindex"),
     ("sec_press",         "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&dateb=&owner=include&count=40&output=atom"),
+    ("investing_com",     "https://www.investing.com/rss/news_25.rss"),
+    # Australian feeds
+    ("abc_business",      "https://www.abc.net.au/news/feed/51120/rss.xml"),
+    ("smh_business",      "https://www.smh.com.au/rss/business.xml"),
 ]
 
 KEYWORDS = [
+    # US signals
     "IPO", "goes public", "S-1", "direct listing", "SPAC", "merger",
     "ETF launch", "new fund", "pre-IPO", "SPV", "secondary", "tender offer",
     "insider buying", "13D", "activist", "spin-off", "spinoff",
     "short squeeze", "short interest", "index inclusion",
+    # Australian signals
+    "ASX", "prospectus", "substantial shareholder", "director buying",
+    "takeover", "scheme of arrangement", "capital raising", "placement",
+    "demerger", "IPO Australia", "listing", "ASX 200",
 ]
 
 

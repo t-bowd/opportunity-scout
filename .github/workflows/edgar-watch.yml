@@ -1,10 +1,9 @@
 name: EDGAR Watcher
 
 on:
-  # Disabled until Gemini quota situation is resolved — daily workflow handles
-  # classification. Re-enable the cron below once quota is confirmed stable.
-  # schedule:
-  #   - cron: "0 * * * 1-5"
+  schedule:
+    # Every hour Mon-Fri (24hrs — cheap at <2min/run, dedup handles repeats)
+    - cron: "0 * * * 1-5"
   workflow_dispatch:
 
 jobs:

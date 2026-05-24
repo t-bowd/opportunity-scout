@@ -18,13 +18,13 @@ PATTERNS_TO_SCORE = {
     "insider_buy", "activist", "smart_money", "spin_off",
 }
 
-SCORING_PROMPT = """You are scoring stock market opportunities for a retail investor.
+SCORING_PROMPT = """You are scoring stock market opportunities for a retail investor based in Australia.
 
-You will receive signals from SEC filings (Form 4 insider buys, S-1 IPOs, 13F institutional holdings, 13D activist stakes) and financial news.
+You will receive signals from SEC filings (Form 4 insider buys, S-1 IPOs, 13F institutional holdings, 13D activist stakes) and financial news including Australian sources (ASX announcements, SMH, ABC Business).
 
 Each signal names a real company. Your job:
 1. Identify the top 5 most actionable opportunities from the signals
-2. For each, use the REAL NYSE or NASDAQ ticker symbol for that company — look it up from your training data. Do NOT invent placeholder names like "INSIDERCO" or "DUALPLAY".
+2. For each, use the REAL ticker symbol — NYSE/NASDAQ for US stocks, or ASX ticker (e.g. CBA.AX) for Australian stocks. Do NOT invent placeholder names.
 3. Score each opportunity
 
 Score each dimension 0-5:
