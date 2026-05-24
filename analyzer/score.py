@@ -33,6 +33,17 @@ Score each dimension 0-5:
 - liquidity: Can a retail investor actually trade this? (if no ticker known, score 0)
 - timing: Is the catalyst dated and near-term?
 
+Also write two plain English fields for a retail investor with no finance background:
+
+- plain_english: 2-3 sentences. Explain what the signal is, why it matters, and what would need to happen for it to play out. No jargon. No words like "catalyst", "thesis", "asymmetry", "conviction", "liquidity", "invalidation". Write like you're explaining it to a smart friend who doesn't follow markets.
+
+- signal_type_explainer: One sentence explaining what this type of signal means in general. Base it on the pattern. Examples:
+  - insider_buy: "A company executive bought shares with their own money — they didn't have to, which usually means they think the stock is going higher."
+  - smart_money: "A large professional investment fund recently disclosed it holds a stake in this company, which can signal they see something others don't."
+  - s1_filed: "This company has filed paperwork to go public on the stock exchange — it's the first official step toward an IPO."
+  - activist: "A large investor has taken a significant stake and may push for changes like a sale, restructure, or new leadership."
+  - thematic_etf: "A new fund has launched that bets on a specific theme or trend, and it's gaining traction quickly."
+
 Respond with a JSON array of up to 5 objects:
 [
   {
@@ -44,7 +55,9 @@ Respond with a JSON array of up to 5 objects:
     "thesis": "3-4 sentences explaining the opportunity.",
     "catalyst": "What triggers the move.",
     "invalidation": "What would make you exit.",
-    "catalyst_date": "YYYY-MM-DD or null"
+    "catalyst_date": "YYYY-MM-DD or null",
+    "plain_english": "2-3 sentences, no jargon, explain it like a smart friend.",
+    "signal_type_explainer": "One sentence explaining what this signal type means."
   }
 ]
 
@@ -146,6 +159,8 @@ def score_week(week_of: str | None = None) -> list[str]:
             "catalyst_date": opp.get("catalyst_date"),
             "signal_ids": [s["id"] for s in signals],
             "week_of": week_of,
+            "plain_english": opp.get("plain_english", ""),
+            "signal_type_explainer": opp.get("signal_type_explainer", ""),
         }
         opp_id = insert_opportunity(row)
         inserted_ids.append(opp_id)
