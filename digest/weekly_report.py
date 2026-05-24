@@ -206,13 +206,6 @@ def _build_html(opportunities: list[dict], week_of: str) -> str:
 
   {opp_html}
 
-  <br>
-  <p style="background:#f5f5f5; padding:12px; border-radius:6px;">
-    <strong>Grade this week:</strong><br>
-    Open the <a href="{feedback_url}">feedback table in Supabase</a> and fill in
-    <code>acted</code> (true/false) and <code>grade</code> (1–5) for each row.<br>
-    Or run: <code>python grade.py --list</code> from the repo.
-  </p>
 
   {paper_html}
 

@@ -140,6 +140,23 @@ def close_paper_position(position_id: str, updates: dict) -> None:
     db.table("paper_positions").update(updates).eq("id", position_id).execute()
 
 
+def auto_fill_feedback_entry(opportunity_id: str, entry_price_aud: float) -> None:
+    """When paper trading enters a position, mark the feedback row as acted."""
+    db = get_client()
+    db.table("feedback").upsert(
+        {"opportunity_id": opportunity_id, "acted": True, "entry_price": entry_price_aud},
+        on_conflict="opportunity_id",
+    ).execute()
+
+
+def auto_fill_feedback_exit(opportunity_id: str, grade: int) -> None:
+    """When paper trading closes a position, auto-grade the feedback row."""
+    db = get_client()
+    db.table("feedback").update({"grade": grade}).eq(
+        "opportunity_id", opportunity_id
+    ).execute()
+
+
 def insert_paper_skipped(skip: dict) -> None:
     db = get_client()
     db.table("paper_skipped_entries").insert(skip).execute()

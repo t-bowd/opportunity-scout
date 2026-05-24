@@ -21,6 +21,7 @@ from db.client import (
     insert_paper_position,
     insert_paper_skipped,
     paper_position_exists_for_opportunity,
+    auto_fill_feedback_entry,
 )
 
 # Days since the opportunity was scored — proxy for signal recency.
@@ -208,6 +209,7 @@ def run_entries(week_of: str | None = None) -> None:
         }
 
         insert_paper_position(pos)
+        auto_fill_feedback_entry(opp_id, entry_price_aud)
         open_count += 1
         open_tickers.add(ticker)
         entered += 1

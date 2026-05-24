@@ -10,7 +10,16 @@ Exit rules:
 import requests
 from datetime import date, datetime, timezone
 
-from db.client import get_open_paper_positions, close_paper_position
+from db.client import get_open_paper_positions, close_paper_position, auto_fill_feedback_exit
+
+
+def _pnl_to_grade(pnl_pct: float) -> int:
+    """Convert actual P&L % into a 1-5 grade for the feedback table."""
+    if pnl_pct >= 10:  return 5   # strong win
+    if pnl_pct >= 2:   return 4   # modest win
+    if pnl_pct >= -3:  return 3   # flat / noise
+    if pnl_pct >= -8:  return 2   # small loss
+    return 1                       # stopped out / big loss
 
 MAX_HOLD_DAYS = 28
 STOP_LOSS_PCT = -12.0
@@ -109,6 +118,8 @@ def run_exits() -> None:
             "pnl_pct": pnl_pct,
             "updated_at": now_iso,
         })
+        if pos.get("opportunity_id"):
+            auto_fill_feedback_exit(pos["opportunity_id"], _pnl_to_grade(pnl_pct))
         print(
             f"[paper/exit] CLOSED {ticker} ({exit_reason}) — "
             f"{pnl_pct:+.1f}% / ${pnl_aud:+.2f} AUD after {days_held}d"
