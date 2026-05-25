@@ -28,8 +28,8 @@ Each signal names a real company. Your job:
 3. Score each opportunity
 
 Score each dimension 0-5:
-- conviction: How many independent signals support this?
-- asymmetry: What is the upside/downside ratio given the catalyst?
+- conviction: How many independent signals support this? Is the insider buying discretionary (open market) or automatic (ESPP/plan)? Discretionary buys score higher.
+- asymmetry: What is the upside/downside ratio? Use the price context — a stock already down 50%+ from its 52-week high with analysts near the current price has poor asymmetry. A stock near its high with a clear catalyst has strong asymmetry.
 - liquidity: Can a retail investor actually trade this? (if no ticker known, score 0)
 - timing: Is the catalyst dated and near-term?
 
@@ -91,14 +91,41 @@ def _fetch_week_signals(week_of: str) -> list[dict]:
     return result.data
 
 
-def _get_price(ticker: str) -> float | None:
+def _get_price_context(ticker: str) -> dict:
+    """
+    Fetch current price plus 52-week high/low from Yahoo Finance.
+    Returns a dict with price, week52_high, week52_low, ytd_change_pct.
+    All fields may be None if the fetch fails.
+    """
     import requests
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1y"
         resp = requests.get(url, headers={"User-Agent": "OpportunityScout"}, timeout=10)
-        return resp.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
+        data = resp.json()["chart"]["result"][0]
+        meta = data["meta"]
+        closes = data.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        closes = [c for c in closes if c is not None]
+
+        price = meta.get("regularMarketPrice")
+        week52_high = max(closes) if closes else None
+        week52_low = min(closes) if closes else None
+        ytd_pct = (
+            round((price - closes[0]) / closes[0] * 100, 1)
+            if closes and closes[0] and price
+            else None
+        )
+        return {
+            "price": price,
+            "week52_high": round(week52_high, 2) if week52_high else None,
+            "week52_low": round(week52_low, 2) if week52_low else None,
+            "ytd_change_pct": ytd_pct,
+        }
     except Exception:
-        return None
+        return {"price": None, "week52_high": None, "week52_low": None, "ytd_change_pct": None}
+
+
+def _get_price(ticker: str) -> float | None:
+    return _get_price_context(ticker).get("price")
 
 
 def score_week(week_of: str | None = None) -> list[str]:
@@ -111,11 +138,29 @@ def score_week(week_of: str | None = None) -> list[str]:
         print(f"[score] no signals to score for week {week_of}")
         return []
 
-    summaries = "\n\n".join(
-        f"[{s['source']} / {s['pattern']}] {s['summary'] or json.dumps(s['raw_data'])[:300]}"
-        for s in signals
-    )
+    # Build per-signal summaries enriched with price context where available.
+    # Tickers are extracted from raw_data entity_name hints; Gemini resolves
+    # the real ticker during scoring, so we do a best-effort lookup here.
+    def _signal_summary(s: dict) -> str:
+        base = f"[{s['source']} / {s['pattern']}] {s['summary'] or json.dumps(s['raw_data'])[:300]}"
+        # Try to get a ticker hint from raw_data for price context
+        raw = s.get("raw_data", {})
+        ticker_hint = raw.get("vehicle") or raw.get("ticker")
+        if ticker_hint:
+            px = _get_price_context(ticker_hint)
+            if px.get("price"):
+                parts = [f"Current price: ${px['price']}"]
+                if px.get("week52_high"):
+                    pct_from_high = round((px["price"] - px["week52_high"]) / px["week52_high"] * 100, 1)
+                    parts.append(f"52-week high: ${px['week52_high']} ({pct_from_high:+.1f}% from high)")
+                if px.get("week52_low"):
+                    parts.append(f"52-week low: ${px['week52_low']}")
+                if px.get("ytd_change_pct") is not None:
+                    parts.append(f"YTD: {px['ytd_change_pct']:+.1f}%")
+                base += "\n  Price context: " + " | ".join(parts)
+        return base
 
+    summaries = "\n\n".join(_signal_summary(s) for s in signals)
     prompt = f"Week of {week_of}. Signals:\n\n{summaries}"
 
     try:
@@ -142,7 +187,8 @@ def score_week(week_of: str | None = None) -> list[str]:
     inserted_ids = []
     for opp in opportunities[:5]:
         ticker = opp.get("vehicle")
-        price = _get_price(ticker) if ticker else None
+        px = _get_price_context(ticker) if ticker else {}
+        price = px.get("price")
 
         row = {
             "title": f"{opp.get('vehicle', 'Unknown')} — {opp.get('catalyst', 'see thesis')[:60]}",
