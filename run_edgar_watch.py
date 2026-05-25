@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 load_dotenv(".env.local")
 
 from collectors import edgar
-from analyzer.classify import get_unprocessed_signals, classify_signal
-from db.client import mark_signal_processed, get_client
+from analyzer.classify import classify_signal
+from db.client import get_unprocessed_signals, mark_signal_processed
 
 resend.api_key = os.environ["RESEND_API_KEY"]
 DIGEST_TO = os.environ["DIGEST_EMAIL"]

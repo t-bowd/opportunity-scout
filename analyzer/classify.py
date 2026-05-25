@@ -118,6 +118,25 @@ def classify_signal_with_llm(signal: dict) -> dict | None:
         return None
 
 
+def classify_signal(signal: dict) -> dict | None:
+    """
+    Classify a single signal — used by the EDGAR watcher for real-time alerts.
+    Returns a dict with at minimum 'pattern' and 'summary', or None on failure.
+    """
+    source = signal.get("source", "")
+    if source in RULE_BASED_SOURCES:
+        return {
+            "pattern": signal.get("pattern") or "irrelevant",
+            "summary": _rule_based_summary(signal),
+            "entity_name": signal.get("raw_data", {}).get("entity_name", "Unknown"),
+            "ticker": signal.get("raw_data", {}).get("vehicle"),
+            "confidence": 90,
+        }
+    elif source == "news":
+        return classify_signal_with_llm(signal)
+    return None
+
+
 def run(limit: int = 50) -> int:
     signals = get_unprocessed_signals(limit=limit)
     classified = 0
