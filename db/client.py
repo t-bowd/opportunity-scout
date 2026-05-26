@@ -140,6 +140,16 @@ def close_paper_position(position_id: str, updates: dict) -> None:
     db.table("paper_positions").update(updates).eq("id", position_id).execute()
 
 
+def update_paper_position_peak(
+    position_id: str, peak_price_aud: float, trailing_stop_active: bool
+) -> None:
+    db = get_client()
+    db.table("paper_positions").update({
+        "peak_price_aud": peak_price_aud,
+        "trailing_stop_active": trailing_stop_active,
+    }).eq("id", position_id).execute()
+
+
 def auto_fill_feedback_entry(opportunity_id: str, entry_price_aud: float) -> None:
     """When paper trading enters a position, mark the feedback row as acted."""
     db = get_client()

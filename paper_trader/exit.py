@@ -10,7 +10,15 @@ Exit rules:
 import requests
 from datetime import date, datetime, timezone
 
-from db.client import get_open_paper_positions, close_paper_position, auto_fill_feedback_exit
+from db.client import (
+    get_open_paper_positions,
+    close_paper_position,
+    update_paper_position_peak,
+    auto_fill_feedback_exit,
+)
+
+TRAILING_STOP_ACTIVATE_PCT = 30.0   # activate trailing stop once up 30%
+TRAILING_STOP_TRAIL_PCT    = 15.0   # exit if price falls 15% below peak
 
 
 def _pnl_to_grade(pnl_pct: float) -> int:
@@ -94,17 +102,43 @@ def run_exits() -> None:
             (exit_price_aud - entry_price_aud) / entry_price_aud * 100, 2
         )
 
-        # Evaluate exit conditions (time first, then stop)
-        if days_held >= MAX_HOLD_DAYS:
-            exit_reason = "time_exit"
-            new_status = "closed_time"
+        # --- Trailing stop maintenance ---
+        # Update peak price and activate trailing stop if threshold reached
+        current_peak = float(pos.get("peak_price_aud") or entry_price_aud)
+        trailing_active = bool(pos.get("trailing_stop_active", False))
+
+        new_peak = max(current_peak, exit_price_aud)
+        should_activate = pnl_pct >= TRAILING_STOP_ACTIVATE_PCT
+
+        if new_peak != current_peak or should_activate != trailing_active:
+            update_paper_position_peak(pos["id"], new_peak, should_activate)
+            if should_activate and not trailing_active:
+                print(
+                    f"[paper/exit] TRAILING STOP ACTIVATED {ticker} — "
+                    f"up {pnl_pct:+.1f}%, peak ${new_peak:.2f} AUD, "
+                    f"stop at ${new_peak * (1 - TRAILING_STOP_TRAIL_PCT / 100):.2f} AUD"
+                )
+
+        # --- Exit evaluation (priority order) ---
+        trailing_stop_price = new_peak * (1 - TRAILING_STOP_TRAIL_PCT / 100)
+
+        if should_activate and exit_price_aud < trailing_stop_price:
+            exit_reason = "trailing_stop"
+            new_status = "closed_trail"
         elif pnl_pct <= STOP_LOSS_PCT:
             exit_reason = "stop_loss"
             new_status = "closed_stop"
+        elif days_held >= MAX_HOLD_DAYS:
+            exit_reason = "time_exit"
+            new_status = "closed_time"
         else:
+            trail_note = (
+                f" | trailing stop active, floor ${trailing_stop_price:.2f}"
+                if should_activate else ""
+            )
             print(
                 f"[paper/exit] HOLD {ticker} — "
-                f"{days_held}d, {pnl_pct:+.1f}% (${pnl_aud:+.2f} AUD)"
+                f"{days_held}d, {pnl_pct:+.1f}% (${pnl_aud:+.2f} AUD){trail_note}"
             )
             continue
 
