@@ -65,8 +65,9 @@ def _rule_based_summary(signal: dict) -> str:
 
     summaries = {
         "edgar_4":      (
-            f"SEC Form 4 insider transaction filed on {filing_date}. "
-            f"Company: {entity}. An executive or director bought or sold shares on the open market. "
+            f"SEC Form 4 open market purchase filed on {filing_date}. "
+            f"Company: {entity}. An executive or director bought shares on the open market "
+            f"with their own money (transaction code P — discretionary purchase, not a plan or grant). "
             f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
         ),
         "edgar_s1":     (

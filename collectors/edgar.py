@@ -39,7 +39,7 @@ def _edgar_search(form_type: str, start_date: str, end_date: str) -> list[dict]:
     # ESPP/plan purchases are automatic payroll deductions, not a conviction signal.
     # Full-text search for "Open Market" filters to discretionary buys (transaction code P).
     if form_type == "4":
-        params["q"] = '"Open Market"'
+        params["q"] = '"Open Market Purchase"'
 
     resp = requests.get(EDGAR_SEARCH, params=params, headers=HEADERS, timeout=15)
     resp.raise_for_status()
