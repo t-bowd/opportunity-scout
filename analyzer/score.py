@@ -30,7 +30,9 @@ Each signal names a real company. Your job:
 Score each dimension 0-5:
 - conviction: How many independent signals support this? Is the insider buying discretionary (open market) or automatic (ESPP/plan)? Discretionary buys score higher.
 - asymmetry: What is the upside/downside ratio? Use the price context — a stock already down 50%+ from its 52-week high with analysts near the current price has poor asymmetry. A stock near its high with a clear catalyst has strong asymmetry.
-- liquidity: Can a retail investor actually trade this? (if no ticker known, score 0)
+- liquidity: Can a retail investor actually trade this? Use market cap as your primary guide:
+  micro-cap (<$300M) score 0-1, small-cap ($300M-$2B) score 2-3, mid/large-cap score 4-5.
+  If no ticker known, score 0.
 - timing: Is the catalyst dated and near-term?
 
 Also write two plain English fields for a retail investor with no finance background:
@@ -114,14 +116,19 @@ def _get_price_context(ticker: str) -> dict:
             if closes and closes[0] and price
             else None
         )
+        market_cap = meta.get("marketCap")
         return {
             "price": price,
             "week52_high": round(week52_high, 2) if week52_high else None,
             "week52_low": round(week52_low, 2) if week52_low else None,
             "ytd_change_pct": ytd_pct,
+            "market_cap": market_cap,
         }
     except Exception:
-        return {"price": None, "week52_high": None, "week52_low": None, "ytd_change_pct": None}
+        return {
+            "price": None, "week52_high": None, "week52_low": None,
+            "ytd_change_pct": None, "market_cap": None,
+        }
 
 
 def _get_price(ticker: str) -> float | None:
@@ -157,6 +164,17 @@ def score_week(week_of: str | None = None) -> list[str]:
                     parts.append(f"52-week low: ${px['week52_low']}")
                 if px.get("ytd_change_pct") is not None:
                     parts.append(f"YTD: {px['ytd_change_pct']:+.1f}%")
+                if px.get("market_cap"):
+                    mc = px["market_cap"]
+                    if mc >= 10_000_000_000:
+                        tier = f"${mc/1_000_000_000:.1f}B — large-cap"
+                    elif mc >= 2_000_000_000:
+                        tier = f"${mc/1_000_000_000:.1f}B — mid-cap"
+                    elif mc >= 300_000_000:
+                        tier = f"${mc/1_000_000:.0f}M — small-cap"
+                    else:
+                        tier = f"${mc/1_000_000:.0f}M — micro-cap, likely illiquid"
+                    parts.append(f"Market cap: {tier}")
                 base += "\n  Price context: " + " | ".join(parts)
         return base
 
