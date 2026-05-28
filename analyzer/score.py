@@ -176,6 +176,8 @@ def score_week(week_of: str | None = None) -> list[str]:
                         tier = f"${mc/1_000_000:.0f}M — micro-cap, likely illiquid"
                     parts.append(f"Market cap: {tier}")
                 base += "\n  Price context: " + " | ".join(parts)
+        elif ticker_hint:
+            base += "\n  Price context: unavailable (ticker may be stale or delisted) — score liquidity conservatively"
         return base
 
     summaries = "\n\n".join(_signal_summary(s) for s in signals)
