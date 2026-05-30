@@ -161,11 +161,16 @@ def run(limit: int = 50) -> int:
                     result.get("pattern", "irrelevant"),
                 )
                 classified += 1
+            else:
+                # Mark as processed so it doesn't accumulate across runs.
+                # It will be skipped by the scorer (pattern=irrelevant).
+                mark_signal_processed(signal["id"], "", "irrelevant")
             time.sleep(5)  # rate limit only applies to LLM calls
 
         else:
             # Unknown source — mark processed as irrelevant so it doesn't block
             mark_signal_processed(signal["id"], "", "irrelevant")
+            classified += 1
 
     print(f"[classify] classified {classified}/{len(signals)} signals")
     return classified
