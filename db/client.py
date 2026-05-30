@@ -44,12 +44,20 @@ def insert_signal(signal: dict) -> str | None:
     return result.data[0]["id"]
 
 
-def get_unprocessed_signals(limit: int = 50) -> list[dict]:
+def get_unprocessed_signals(limit: int = 50, max_age_days: int = 7) -> list[dict]:
+    """
+    Fetch unprocessed signals from the last max_age_days days.
+    Signals older than the cutoff are ignored — if Gemini repeatedly
+    fails on a signal it will age out naturally rather than accumulating.
+    """
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=max_age_days)).isoformat()
     db = get_client()
     return (
         db.table("signals")
         .select("*")
         .eq("processed", False)
+        .gte("signal_date", cutoff)
         .order("signal_date", desc=True)
         .limit(limit)
         .execute()

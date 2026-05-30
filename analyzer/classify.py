@@ -161,10 +161,9 @@ def run(limit: int = 50) -> int:
                     result.get("pattern", "irrelevant"),
                 )
                 classified += 1
-            else:
-                # Mark as processed so it doesn't accumulate across runs.
-                # It will be skipped by the scorer (pattern=irrelevant).
-                mark_signal_processed(signal["id"], "", "irrelevant")
+            # On failure, leave as unprocessed so tomorrow's run retries it.
+            # Signals older than 7 days are excluded by get_unprocessed_signals
+            # so failed signals age out naturally rather than accumulating.
             time.sleep(5)  # rate limit only applies to LLM calls
 
         else:
