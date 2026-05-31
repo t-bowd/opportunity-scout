@@ -8,7 +8,7 @@ import re
 from datetime import date, timedelta
 from google import genai
 from google.genai import types
-from db.client import get_client, insert_opportunity
+from db.client import get_client, insert_opportunity, opportunity_exists
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = "gemini-2.5-flash"
@@ -207,8 +207,23 @@ def score_week(week_of: str | None = None) -> list[str]:
     inserted_ids = []
     for opp in opportunities[:5]:
         ticker = opp.get("vehicle")
-        px = _get_price_context(ticker) if ticker else {}
+        if not ticker:
+            continue
+
+        # Skip if already scored this ticker this week (daily re-runs create duplicates)
+        if opportunity_exists(ticker, week_of):
+            print(f"[score] {ticker} already scored for week {week_of}, skipping")
+            continue
+
+        px = _get_price_context(ticker)
         price = px.get("price")
+
+        # Skip if we can't verify the price — likely a stale or changed ticker.
+        # ZI→GTM is the canonical example: Gemini suggests the old ticker,
+        # we can't fetch data for it, and entry.py will also fail. No point inserting.
+        if price is None:
+            print(f"[score] {ticker} price unavailable — skipping (stale ticker?)")
+            continue
 
         row = {
             "title": f"{opp.get('vehicle', 'Unknown')} — {opp.get('catalyst', 'see thesis')[:60]}",

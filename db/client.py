@@ -72,6 +72,19 @@ def mark_signal_processed(signal_id: str, summary: str, pattern: str) -> None:
     ).eq("id", signal_id).execute()
 
 
+def opportunity_exists(vehicle: str, week_of: str) -> bool:
+    """True if this ticker has already been scored for this week."""
+    db = get_client()
+    result = (
+        db.table("opportunities")
+        .select("id")
+        .eq("vehicle", vehicle)
+        .eq("week_of", week_of)
+        .execute()
+    )
+    return len(result.data) > 0
+
+
 def insert_opportunity(opp: dict) -> str:
     db = get_client()
     result = db.table("opportunities").insert(opp).execute()
