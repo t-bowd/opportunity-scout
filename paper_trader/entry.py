@@ -11,7 +11,8 @@ Entry filters (all must pass):
   6.  Price fetchable from Yahoo Finance
   7.  Price has not moved >8% since scoring (avoids chasing)
   8.  Not within 7 days of scheduled earnings (avoids binary event risk)
-  9.  Relative volume ≥ 1.5× 20-day average (confirms market participation)
+  9.  Relative volume ≥ 1.5× for news/thematic signals, ≥ 0.8× for EDGAR signals
+      (EDGAR filings are historical — volume spike may have already passed)
   10. Sector not already at 2 open positions (diversification)
   11. Position size yields at least 1 share at $200 AUD target
 """
@@ -54,10 +55,17 @@ MAX_SECTOR_POSITIONS = 2
 POSITION_SIZE_AUD = 200.0
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
-MIN_RELATIVE_VOLUME = 1.5       # must be 1.5× 20-day avg volume
 SLIPPAGE_PCT = 0.5
 US_BROKERAGE_AUD = 1.0
 ASX_BROKERAGE_AUD = 0.0
+
+# Volume thresholds by pattern type.
+# EDGAR signals (insider buys, 13F, S-1, activist) are historical filings —
+# the volume spike often happens before we process them or not at all.
+# News and thematic signals are current, so the market should react same-day.
+EDGAR_PATTERNS = {"insider_buy", "smart_money", "s1_filed", "activist", "etf_launch", "spin_off"}
+MIN_RELATIVE_VOLUME_NEWS = 1.5   # news/thematic: must be 1.5× avg
+MIN_RELATIVE_VOLUME_EDGAR = 0.8  # EDGAR: just needs some activity
 
 HEADERS = {"User-Agent": "OpportunityScout"}
 
@@ -258,9 +266,14 @@ def run_entries(week_of: str | None = None) -> None:
             skip(f"earnings_in_{days_to_earnings}d")
             continue
 
-        # 9. Relative volume
+        # 9. Relative volume — threshold depends on pattern type
+        pattern = opp.get("pattern", "")
+        vol_threshold = (
+            MIN_RELATIVE_VOLUME_EDGAR if pattern in EDGAR_PATTERNS
+            else MIN_RELATIVE_VOLUME_NEWS
+        )
         rel_vol = _fetch_relative_volume(ticker)
-        if rel_vol is not None and rel_vol < MIN_RELATIVE_VOLUME:
+        if rel_vol is not None and rel_vol < vol_threshold:
             skip(f"low_relative_volume_{rel_vol:.2f}x")
             continue
 
