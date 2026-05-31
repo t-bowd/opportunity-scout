@@ -90,7 +90,7 @@ def _format_paper_section(week_of: str) -> str:
         for p in open_pos:
             entry_date = p.get("entry_date", "")
             days_held = (date.today() - date.fromisoformat(entry_date)).days if entry_date else "?"
-                trailing = p.get("trailing_stop_active", False)
+            trailing = p.get("trailing_stop_active", False)
             trail_badge = (
                 " <span style='font-size:10px;background:#fff3cd;padding:1px 5px;"
                 "border-radius:3px;color:#856404'>trailing stop</span>"
