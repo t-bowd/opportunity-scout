@@ -93,6 +93,35 @@ def _fetch_week_signals(week_of: str) -> list[dict]:
     return result.data
 
 
+def _log_week_signal_breakdown(week_of: str) -> None:
+    """Print a full breakdown of processed signals for the week — diagnostic only."""
+    db = get_client()
+    week_end = (date.fromisoformat(week_of) + timedelta(days=6)).isoformat()
+    all_processed = (
+        db.table("signals")
+        .select("pattern, source")
+        .eq("processed", True)
+        .gte("signal_date", week_of)
+        .lte("signal_date", week_end)
+        .execute()
+        .data
+    )
+    if not all_processed:
+        print(f"[score] no processed signals found for week {week_of} — collection may not have run yet")
+        return
+
+    from collections import Counter
+    by_pattern = Counter(s["pattern"] for s in all_processed)
+    scoreable = {p: c for p, c in by_pattern.items() if p in PATTERNS_TO_SCORE}
+    skipped = {p: c for p, c in by_pattern.items() if p not in PATTERNS_TO_SCORE}
+
+    print(f"[score] week {week_of} — {len(all_processed)} processed signals total")
+    if scoreable:
+        print(f"[score]   scoreable: " + ", ".join(f"{p}×{c}" for p, c in sorted(scoreable.items())))
+    if skipped:
+        print(f"[score]   not scored: " + ", ".join(f"{p}×{c}" for p, c in sorted(skipped.items())))
+
+
 def _get_price_context(ticker: str) -> dict:
     """
     Fetch current price plus 52-week high/low from Yahoo Finance.
@@ -140,10 +169,13 @@ def score_week(week_of: str | None = None) -> list[str]:
         today = date.today()
         week_of = (today - timedelta(days=today.weekday())).isoformat()
 
+    _log_week_signal_breakdown(week_of)
+
     signals = _fetch_week_signals(week_of)
     if not signals:
-        print(f"[score] no signals to score for week {week_of}")
+        print(f"[score] no scoreable signals for week {week_of} — all classified as irrelevant/non-scoreable patterns")
         return []
+    print(f"[score] sending {len(signals)} signals to Gemini for scoring")
 
     # Build per-signal summaries enriched with price context where available.
     # Tickers are extracted from raw_data entity_name hints; Gemini resolves
@@ -205,6 +237,9 @@ def score_week(week_of: str | None = None) -> list[str]:
         return []
 
     inserted_ids = []
+    already_scored = 0
+    no_price = 0
+
     for opp in opportunities[:5]:
         ticker = opp.get("vehicle")
         if not ticker:
@@ -213,6 +248,7 @@ def score_week(week_of: str | None = None) -> list[str]:
         # Skip if already scored this ticker this week (daily re-runs create duplicates)
         if opportunity_exists(ticker, week_of):
             print(f"[score] {ticker} already scored for week {week_of}, skipping")
+            already_scored += 1
             continue
 
         px = _get_price_context(ticker)
@@ -223,6 +259,7 @@ def score_week(week_of: str | None = None) -> list[str]:
         # we can't fetch data for it, and entry.py will also fail. No point inserting.
         if price is None:
             print(f"[score] {ticker} price unavailable — skipping (stale ticker?)")
+            no_price += 1
             continue
 
         row = {
@@ -248,6 +285,11 @@ def score_week(week_of: str | None = None) -> list[str]:
         total = row["conviction"] + row["asymmetry"] + row["liquidity"] + row["timing"]
         print(f"[score] {row['title']} — score {total}/20")
 
+    print(
+        f"[score] done — {len(inserted_ids)} inserted, "
+        f"{already_scored} already scored this week, "
+        f"{no_price} skipped (no price)"
+    )
     return inserted_ids
 
 
