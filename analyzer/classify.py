@@ -78,9 +78,12 @@ def _rule_based_summary(signal: dict) -> str:
             f"Use the real NYSE/NASDAQ ticker for {entity} if already assigned, otherwise note as pre-IPO."
         ),
         "edgar_13f_hr": (
-            f"SEC 13F institutional holdings report filed by {entity} on {filing_date}. "
-            f"This fund disclosed its quarterly equity positions. "
-            f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
+            f"SEC 13F filing on {filing_date}: the fund {raw.get('fund_name', 'a large institutional investor')} "
+            f"disclosed holding a position in {entity} "
+            f"(reported value ~${raw.get('value_usd', 0):,} USD). "
+            f"This is one of the fund's larger positions. Note: 13F data is filed up to 45 days after "
+            f"quarter-end, so it is backward-looking — weight it as confirmation, not a fresh catalyst. "
+            f"Use the real NYSE/NASDAQ ticker for {entity} (the held company, not the fund) when scoring."
         ),
         "edgar_13d":    (
             f"SEC 13D activist filing on {filing_date}. "

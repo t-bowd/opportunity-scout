@@ -30,12 +30,10 @@ Each signal names a real company. Your job:
 IMPORTANT: Only select opportunities in publicly listed companies with a real, tradeable stock ticker (NYSE, NASDAQ, or ASX). Private companies (e.g. SpaceX, Anthropic, OpenAI, Stripe) cannot be traded and must NOT be selected — skip them entirely. If a signal references a private company and the best angle is a publicly-traded proxy (e.g. a listed supplier or partner), name the proxy company and its ticker instead.
 
 Score each dimension 0-5:
-- conviction: How many independent signals support this? Is the insider buying discretionary (open market) or automatic (ESPP/plan)? Discretionary buys score higher.
+- conviction: How many independent signals support this? Is the insider buying discretionary (open market, code P) or automatic (ESPP/plan)? Discretionary buys score higher. For 13F holdings, remember the data is up to 45 days stale — treat it as confirmation, not a strong standalone signal.
 - asymmetry: What is the upside/downside ratio? Use the price context — a stock already down 50%+ from its 52-week high with analysts near the current price has poor asymmetry. A stock near its high with a clear catalyst has strong asymmetry.
-- liquidity: Can a retail investor actually trade this? Use market cap as your primary guide:
-  micro-cap (<$300M) score 0-1, small-cap ($300M-$2B) score 2-3, mid/large-cap score 4-5.
-  If no ticker known, score 0.
-- timing: Is the catalyst dated and near-term?
+- liquidity: This is a small retail position (~$200). At that size almost any listed stock is tradeable, so score GENEROUSLY and do NOT penalise a company just for being small-cap — small-caps are where the best insider-buy opportunities live. Score 5 for any normally listed NYSE/NASDAQ/ASX stock. Score 2-3 only for genuinely thin situations (nano-cap under ~$50M, OTC/pink-sheet). Score 0 only if there is no real tradeable ticker (e.g. a private company). Liquidity should rarely be the reason a good opportunity scores low.
+- timing: Is there a near-term catalyst? Note: insider buys and 13F holdings often have no dated catalyst — for these, judge timing on how recent the signal is rather than expecting a specific event date, and don't zero it out just because there's no scheduled event.
 
 Also write two plain English fields for a retail investor with no finance background:
 
@@ -56,6 +54,7 @@ Respond with a JSON array of up to 5 objects:
     "liquidity": 5,
     "timing": 2,
     "vehicle": "REAL_TICKER",
+    "pattern": "the signal pattern this pick is based on — one of: insider_buy, smart_money, s1_filed, activist, thematic_etf, spin_off, pre_ipo_proxy",
     "thesis": "3-4 sentences explaining the opportunity.",
     "catalyst": "What triggers the move.",
     "invalidation": "What would make you exit.",
@@ -126,8 +125,14 @@ def _log_week_signal_breakdown(week_of: str) -> None:
 
 def _get_price_context(ticker: str) -> dict:
     """
-    Fetch current price plus 52-week high/low from Yahoo Finance.
-    Returns a dict with price, week52_high, week52_low, ytd_change_pct.
+    Fetch price, 52-week high/low, YTD, and average daily DOLLAR volume from
+    Yahoo's chart API (the one endpoint that works without auth — quoteSummary
+    and v7/quote now require a cookie+crumb and return 401/429).
+
+    Average dollar volume (price × avg daily share volume) is our tradeability
+    proxy in place of market cap, which the chart API does not expose. It cleanly
+    separates real names (AAPL ~$14B/day) from nano-cap junk (ASPS ~$0.2M/day).
+
     All fields may be None if the fetch fails.
     """
     import requests
@@ -136,8 +141,9 @@ def _get_price_context(ticker: str) -> dict:
         resp = requests.get(url, headers={"User-Agent": "OpportunityScout"}, timeout=10)
         data = resp.json()["chart"]["result"][0]
         meta = data["meta"]
-        closes = data.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-        closes = [c for c in closes if c is not None]
+        quote = data.get("indicators", {}).get("quote", [{}])[0]
+        closes = [c for c in quote.get("close", []) if c is not None]
+        volumes = [v for v in quote.get("volume", []) if v is not None]
 
         price = meta.get("regularMarketPrice")
         week52_high = max(closes) if closes else None
@@ -147,18 +153,24 @@ def _get_price_context(ticker: str) -> dict:
             if closes and closes[0] and price
             else None
         )
-        market_cap = meta.get("marketCap")
+        # Average daily dollar volume over the last ~60 sessions
+        recent_vols = volumes[-60:] if volumes else []
+        avg_dollar_volume = (
+            round(price * (sum(recent_vols) / len(recent_vols)))
+            if recent_vols and price
+            else None
+        )
         return {
             "price": price,
             "week52_high": round(week52_high, 2) if week52_high else None,
             "week52_low": round(week52_low, 2) if week52_low else None,
             "ytd_change_pct": ytd_pct,
-            "market_cap": market_cap,
+            "avg_dollar_volume": avg_dollar_volume,
         }
     except Exception:
         return {
             "price": None, "week52_high": None, "week52_low": None,
-            "ytd_change_pct": None, "market_cap": None,
+            "ytd_change_pct": None, "avg_dollar_volume": None,
         }
 
 
@@ -198,17 +210,15 @@ def score_week(week_of: str | None = None) -> list[str]:
                     parts.append(f"52-week low: ${px['week52_low']}")
                 if px.get("ytd_change_pct") is not None:
                     parts.append(f"YTD: {px['ytd_change_pct']:+.1f}%")
-                if px.get("market_cap"):
-                    mc = px["market_cap"]
-                    if mc >= 10_000_000_000:
-                        tier = f"${mc/1_000_000_000:.1f}B — large-cap"
-                    elif mc >= 2_000_000_000:
-                        tier = f"${mc/1_000_000_000:.1f}B — mid-cap"
-                    elif mc >= 300_000_000:
-                        tier = f"${mc/1_000_000:.0f}M — small-cap"
+                adv = px.get("avg_dollar_volume")
+                if adv:
+                    if adv < 1_000_000:
+                        liq = f"${adv/1_000_000:.2f}M/day traded — very thin, likely nano-cap, treat with caution"
+                    elif adv < 20_000_000:
+                        liq = f"${adv/1_000_000:.1f}M/day traded — small-cap, fine for a small retail position"
                     else:
-                        tier = f"${mc/1_000_000:.0f}M — micro-cap, likely illiquid"
-                    parts.append(f"Market cap: {tier}")
+                        liq = f"${adv/1_000_000:.0f}M/day traded — highly liquid"
+                    parts.append(f"Avg daily volume: {liq}")
                 base += "\n  Price context: " + " | ".join(parts)
         elif ticker_hint:
             base += "\n  Price context: unavailable (ticker may be stale or delisted) — score liquidity conservatively"
@@ -247,9 +257,19 @@ def score_week(week_of: str | None = None) -> list[str]:
         f"{t} ({s}/20)" for t, s in zip(picks, scores)
     ))
 
+    # Minimum average daily dollar volume to bother trading. Below this is
+    # nano-cap / pink-sheet territory — high fraud risk and the kind of thin name
+    # (ASPS trades ~$0.2M/day) we got burned on. This is our tradeability gate
+    # now that liquidity is scored generously; market cap isn't available from
+    # the chart API so dollar volume stands in for it.
+    MIN_DOLLAR_VOLUME = 1_000_000
+    valid_patterns = PATTERNS_TO_SCORE
+    fallback_pattern = signals[0]["pattern"] if signals else "unknown"
+
     inserted_ids = []
     already_scored = 0
     no_price = 0
+    too_small = 0
 
     for opp in opportunities[:5]:
         ticker = opp.get("vehicle")
@@ -273,11 +293,32 @@ def score_week(week_of: str | None = None) -> list[str]:
             no_price += 1
             continue
 
+        # Hard liquidity floor — the real tradeability/quality gate now that the
+        # liquidity score dimension is generous. Only skip when we actually know
+        # volume is below the floor (fail open if unknown).
+        adv = px.get("avg_dollar_volume")
+        if adv is not None and adv < MIN_DOLLAR_VOLUME:
+            print(f"[score] {ticker} avg volume ${adv/1e6:.2f}M/day below floor — skipping")
+            too_small += 1
+            continue
+
+        # Use the pattern Gemini attributed to this specific pick (validated
+        # against the known set); fall back to the dominant signal pattern.
+        pattern = opp.get("pattern")
+        if pattern not in valid_patterns:
+            pattern = fallback_pattern
+
+        # Attribute only same-pattern signals to this opportunity for traceability,
+        # rather than dumping every signal of the week onto every pick.
+        matched_signal_ids = [s["id"] for s in signals if s["pattern"] == pattern]
+        if not matched_signal_ids:
+            matched_signal_ids = [s["id"] for s in signals]
+
         row = {
             "title": f"{opp.get('vehicle', 'Unknown')} — {opp.get('catalyst', 'see thesis')[:60]}",
             "thesis": opp.get("thesis", ""),
             "vehicle": opp.get("vehicle", ""),
-            "pattern": signals[0]["pattern"] if signals else "unknown",
+            "pattern": pattern,
             "catalyst": opp.get("catalyst"),
             "invalidation": opp.get("invalidation"),
             "conviction": opp.get("conviction", 0),
@@ -286,7 +327,7 @@ def score_week(week_of: str | None = None) -> list[str]:
             "timing": opp.get("timing", 0),
             "price_at_score": price,
             "catalyst_date": opp.get("catalyst_date"),
-            "signal_ids": [s["id"] for s in signals],
+            "signal_ids": matched_signal_ids,
             "week_of": week_of,
             "plain_english": opp.get("plain_english", ""),
             "signal_type_explainer": opp.get("signal_type_explainer", ""),
@@ -294,12 +335,12 @@ def score_week(week_of: str | None = None) -> list[str]:
         opp_id = insert_opportunity(row)
         inserted_ids.append(opp_id)
         total = row["conviction"] + row["asymmetry"] + row["liquidity"] + row["timing"]
-        print(f"[score] {row['title']} — score {total}/20")
+        print(f"[score] {row['title']} [{pattern}] — score {total}/20")
 
     print(
         f"[score] done — {len(inserted_ids)} inserted, "
         f"{already_scored} already scored this week, "
-        f"{no_price} skipped (no price)"
+        f"{no_price} skipped (no price), {too_small} skipped (too small)"
     )
     return inserted_ids
 

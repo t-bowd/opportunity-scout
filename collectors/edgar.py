@@ -3,10 +3,19 @@ Polls SEC EDGAR for new filings across 5 form types.
 Respects the SEC's rate limit: max 10 requests/second, user-agent required.
 """
 import os
+import re
 import time
 import requests
 from datetime import date, timedelta
 from db.client import insert_signal
+
+ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
+
+# 13F holdings: how many of the largest positions to emit per filing, and the
+# minimum position value (USD) worth bothering with. Keeps us from inserting a
+# fund's entire long tail of tiny positions.
+THIRTEEN_F_TOP_N = 5
+THIRTEEN_F_MIN_VALUE_USD = 5_000_000
 
 EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index"
 EDGAR_BASE = "https://www.sec.gov"
@@ -93,6 +102,111 @@ def _build_signal(hit: dict, form_type: str, pattern: str) -> dict:
     }
 
 
+def _parse_info_table(xml: str) -> list[dict]:
+    """
+    Extract holdings from a 13F information table XML.
+    Namespace-agnostic (matches <nameOfIssuer> or <ns1:nameOfIssuer>).
+    Returns a list of {issuer, cusip, value_usd, shares}.
+    """
+    holdings = []
+    for block in re.findall(r"<(?:\w+:)?infoTable[ >].*?</(?:\w+:)?infoTable>", xml, re.DOTALL):
+        def _tag(name: str) -> str | None:
+            m = re.search(rf"<(?:\w+:)?{name}>(.*?)</(?:\w+:)?{name}>", block, re.DOTALL)
+            return m.group(1).strip() if m else None
+
+        issuer = _tag("nameOfIssuer")
+        cusip = _tag("cusip")
+        value_raw = _tag("value")
+        shares = _tag("sshPrnamt")
+        if not issuer or not value_raw:
+            continue
+        try:
+            value_usd = int(re.sub(r"[^\d]", "", value_raw))
+        except ValueError:
+            continue
+        holdings.append({
+            "issuer": issuer,
+            "cusip": cusip,
+            "value_usd": value_usd,
+            "shares": shares,
+        })
+    return holdings
+
+
+def _fetch_13f_holdings(cik: str, accession: str) -> list[dict]:
+    """
+    Fetch and parse the information table for a single 13F filing.
+    Returns the top THIRTEEN_F_TOP_N holdings by value (above the min threshold).
+    Fails soft — returns [] on any error so collection continues.
+    """
+    cik_int = str(int(cik))  # strip zero-padding for the archive path
+    acc_nodash = accession.replace("-", "")
+    index_url = f"{ARCHIVES_BASE}/{cik_int}/{acc_nodash}/index.json"
+
+    try:
+        idx = requests.get(index_url, headers=HEADERS, timeout=15).json()
+        items = idx.get("directory", {}).get("item", [])
+        xml_names = [it["name"] for it in items if it.get("name", "").lower().endswith(".xml")]
+
+        holdings: list[dict] = []
+        for name in xml_names:
+            # primary_doc.xml is the cover page, not the holdings table — skip it
+            if name.lower() == "primary_doc.xml":
+                continue
+            url = f"{ARCHIVES_BASE}/{cik_int}/{acc_nodash}/{name}"
+            xml = requests.get(url, headers=HEADERS, timeout=15).text
+            if "infoTable" in xml:
+                holdings = _parse_info_table(xml)
+                if holdings:
+                    break
+            time.sleep(0.2)
+
+        holdings = [h for h in holdings if h["value_usd"] >= THIRTEEN_F_MIN_VALUE_USD]
+        holdings.sort(key=lambda h: h["value_usd"], reverse=True)
+        return holdings[:THIRTEEN_F_TOP_N]
+    except Exception as e:
+        print(f"[edgar] 13F holdings fetch failed for {accession}: {e}")
+        return []
+
+
+def _build_13f_holding_signals(hit: dict) -> list[dict]:
+    """
+    Turn one 13F filing into one signal per top holding.
+    Replaces the old behaviour of emitting a single useless 'fund name' signal —
+    the fund name alone gave Gemini nothing tradeable to resolve.
+    """
+    src = hit.get("_source", {})
+    accession = hit.get("_id", "").split(":")[0]
+    ciks = src.get("ciks", [])
+    if not ciks or not accession:
+        return []
+
+    fund_name = _extract_entity_name(src, "13F-HR")
+    file_date = src.get("file_date") or date.today().isoformat()
+    holdings = _fetch_13f_holdings(ciks[0], accession)
+
+    signals = []
+    for h in holdings:
+        # Unique accession per holding so insert_signal's dedup doesn't collapse
+        # all holdings from one filing into a single row.
+        holding_key = h.get("cusip") or h["issuer"][:12]
+        signals.append({
+            "source": "edgar_13f_hr",
+            "accession_no": f"{accession.replace(':', '-')}-{holding_key}",
+            "pattern": "smart_money",
+            "signal_date": file_date,
+            "url": f"{ARCHIVES_BASE}/{str(int(ciks[0]))}/{accession.replace('-', '')}/",
+            "raw_data": {
+                "entity_name": h["issuer"],     # the held company — what gets scored
+                "fund_name": fund_name,          # who holds it
+                "cusip": h.get("cusip"),
+                "value_usd": h["value_usd"],
+                "shares": h.get("shares"),
+            },
+        })
+    return signals
+
+
 def collect(lookback_days: int = 3) -> int:
     end = date.today()
     start = end - timedelta(days=lookback_days)
@@ -105,11 +219,17 @@ def collect(lookback_days: int = 3) -> int:
             hits = _edgar_search(form_type, start_str, end_str)
             form_inserted = 0
             for hit in hits:
-                signal = _build_signal(hit, form_type, pattern)
-                result = insert_signal(signal)
-                if result:
-                    inserted += 1
-                    form_inserted += 1
+                # 13F: expand into one signal per top holding (the fund name alone
+                # is not tradeable). All other forms: one signal per filing.
+                if form_type == "13F-HR":
+                    signals = _build_13f_holding_signals(hit)
+                    time.sleep(0.3)  # extra calls per 13F — stay under rate limit
+                else:
+                    signals = [_build_signal(hit, form_type, pattern)]
+                for signal in signals:
+                    if insert_signal(signal):
+                        inserted += 1
+                        form_inserted += 1
             print(f"[edgar] {form_type} ({pattern}): {form_inserted} new / {len(hits)} found")
             time.sleep(0.5)  # stay well under SEC rate limit
         except Exception as e:

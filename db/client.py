@@ -104,6 +104,27 @@ def get_top_opportunities(week_of: str, limit: int = 5) -> list[dict]:
     )
 
 
+def get_recent_opportunities(days: int = 10, limit: int = 25) -> list[dict]:
+    """
+    Opportunities scored within the last `days`, highest score first.
+    Used by the paper trader so entries aren't reset to an empty pool every
+    Monday when the calendar week rolls over — per-pattern recency windows in
+    entry.py still gate how fresh each pick must be.
+    """
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    db = get_client()
+    return (
+        db.table("opportunities")
+        .select("*, entities(ticker, name)")
+        .gte("created_at", cutoff)
+        .order("total_score", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
 def insert_feedback_rows(opportunity_ids: list[str]) -> None:
     db = get_client()
     rows = [{"opportunity_id": oid} for oid in opportunity_ids]

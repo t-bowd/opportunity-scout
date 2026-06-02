@@ -12,7 +12,7 @@ from paper_trader import snapshot as paper_snapshot
 
 print("=== Daily collection run ===")
 
-edgar.collect(lookback_days=2)
+edgar.collect(lookback_days=3)
 etf_launches.collect()
 news.collect()
 

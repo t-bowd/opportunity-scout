@@ -1,9 +1,11 @@
 """
-Evaluates this week's top opportunities and opens paper positions.
+Evaluates recent top opportunities (last 10 days) and opens paper positions.
 Runs daily after scoring.
 
 Entry filters (all must pass):
-  1.  Score ≥ 16/20 (raised to 18 in a bearish market regime)
+  1.  Score ≥ 13/20 (raised to 15 in a bearish market regime). Lowered from 16
+      once liquidity stopped being a heavy score penalty; the market-cap floor
+      that guards quality now lives at score time in analyzer/score.py.
   2.  Underlying signal filed within tiered recency window for the pattern
   3.  Fewer than 5 open positions
   4.  No duplicate ticker already open
@@ -22,7 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 from collections import Counter
 
 from db.client import (
-    get_top_opportunities,
+    get_recent_opportunities,
     get_open_paper_positions,
     insert_paper_position,
     insert_paper_skipped,
@@ -47,8 +49,13 @@ RECENCY_WINDOWS: dict[str, int] = {
 }
 DEFAULT_RECENCY = 5
 
-MIN_SCORE = 16
-BEARISH_MIN_SCORE = 18          # higher bar when broad market is in drawdown
+# Score gate. Lowered from 16 once liquidity stopped being a heavy score penalty
+# (see analyzer/score.py): a quality small-cap insider buy now lands ~13-15, and
+# at 16 those were being filtered out entirely — the main reason the pool was dry.
+# The full stack of downstream entry filters (recency, volume, earnings blackout,
+# price-move, sector cap, market-cap floor at score time) does the quality work.
+MIN_SCORE = 13
+BEARISH_MIN_SCORE = 15          # higher bar when broad market is in drawdown
 MARKET_REGIME_THRESHOLD = 0.90  # >10% below 52w high = bearish
 MAX_POSITIONS = 5
 MAX_SECTOR_POSITIONS = 2
@@ -176,7 +183,10 @@ def run_entries(week_of: str | None = None) -> None:
         today = date.today()
         week_of = (today - timedelta(days=today.weekday())).isoformat()
 
-    opportunities = get_top_opportunities(week_of, limit=10)
+    # Pull from the last 10 days rather than the current calendar week so a
+    # Friday-scored opportunity is still actionable on Monday. Per-pattern
+    # recency windows below still gate how fresh each individual pick must be.
+    opportunities = get_recent_opportunities(days=10, limit=25)
     open_positions = get_open_paper_positions()
     open_count = len(open_positions)
     open_tickers = {p["ticker"] for p in open_positions}
@@ -191,9 +201,9 @@ def run_entries(week_of: str | None = None) -> None:
     bearish_us = _market_is_bearish(is_asx=False)
     bearish_asx = _market_is_bearish(is_asx=True)
     if bearish_us:
-        print("[paper/entry] US market regime: BEARISH — min score raised to 18")
+        print(f"[paper/entry] US market regime: BEARISH — min score raised to {BEARISH_MIN_SCORE}")
     if bearish_asx:
-        print("[paper/entry] ASX market regime: BEARISH — min score raised to 18")
+        print(f"[paper/entry] ASX market regime: BEARISH — min score raised to {BEARISH_MIN_SCORE}")
 
     # Sector counts for open positions
     open_sectors: Counter = Counter()
