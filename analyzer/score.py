@@ -27,6 +27,8 @@ Each signal names a real company. Your job:
 2. For each, use the REAL ticker symbol — NYSE/NASDAQ for US stocks, or ASX ticker (e.g. CBA.AX) for Australian stocks. Do NOT invent placeholder names.
 3. Score each opportunity
 
+IMPORTANT: Only select opportunities in publicly listed companies with a real, tradeable stock ticker (NYSE, NASDAQ, or ASX). Private companies (e.g. SpaceX, Anthropic, OpenAI, Stripe) cannot be traded and must NOT be selected — skip them entirely. If a signal references a private company and the best angle is a publicly-traded proxy (e.g. a listed supplier or partner), name the proxy company and its ticker instead.
+
 Score each dimension 0-5:
 - conviction: How many independent signals support this? Is the insider buying discretionary (open market) or automatic (ESPP/plan)? Discretionary buys score higher.
 - asymmetry: What is the upside/downside ratio? Use the price context — a stock already down 50%+ from its 52-week high with analysts near the current price has poor asymmetry. A stock near its high with a clear catalyst has strong asymmetry.
