@@ -15,13 +15,11 @@ Entry filters (all must pass):
   8.  Not within 7 days of scheduled earnings (avoids binary event risk)
   9.  Relative volume ≥ 1.5× for news/thematic signals, ≥ 0.8× for EDGAR signals
       (EDGAR filings are historical — volume spike may have already passed)
-  10. Sector not already at 2 open positions (diversification)
-  11. Position size yields at least 1 share at $200 AUD target
+  10. Position size yields at least 1 share at $200 AUD target
 """
 
 import requests
 from datetime import date, datetime, timedelta, timezone
-from collections import Counter
 
 from db.client import (
     get_recent_opportunities,
@@ -53,12 +51,11 @@ DEFAULT_RECENCY = 5
 # (see analyzer/score.py): a quality small-cap insider buy now lands ~13-15, and
 # at 16 those were being filtered out entirely — the main reason the pool was dry.
 # The full stack of downstream entry filters (recency, volume, earnings blackout,
-# price-move, sector cap, market-cap floor at score time) does the quality work.
+# price-move, dollar-volume floor at score time) does the quality work.
 MIN_SCORE = 13
 BEARISH_MIN_SCORE = 15          # higher bar when broad market is in drawdown
 MARKET_REGIME_THRESHOLD = 0.90  # >10% below 52w high = bearish
 MAX_POSITIONS = 5
-MAX_SECTOR_POSITIONS = 2
 POSITION_SIZE_AUD = 200.0
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
@@ -126,21 +123,6 @@ def _fetch_relative_volume(ticker: str) -> float | None:
         return None
 
 
-def _fetch_sector(ticker: str) -> str | None:
-    """Sector string from Yahoo Finance. Returns None if unavailable."""
-    try:
-        url = (
-            f"https://query1.finance.yahoo.com/v11/finance/quoteSummary/{ticker}"
-            "?modules=assetProfile"
-        )
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        return (
-            resp.json()["quoteSummary"]["result"][0]["assetProfile"].get("sector")
-        )
-    except Exception:
-        return None
-
-
 def _market_is_bearish(is_asx: bool) -> bool:
     """True if the relevant index is >10% below its 52-week high."""
     index = "^AXJO" if is_asx else "SPY"
@@ -204,13 +186,6 @@ def run_entries(week_of: str | None = None) -> None:
         print(f"[paper/entry] US market regime: BEARISH — min score raised to {BEARISH_MIN_SCORE}")
     if bearish_asx:
         print(f"[paper/entry] ASX market regime: BEARISH — min score raised to {BEARISH_MIN_SCORE}")
-
-    # Sector counts for open positions
-    open_sectors: Counter = Counter()
-    for pos in open_positions:
-        sector = _fetch_sector(pos["ticker"])
-        if sector:
-            open_sectors[sector] += 1
 
     entered = 0
 
@@ -287,12 +262,6 @@ def run_entries(week_of: str | None = None) -> None:
             skip(f"low_relative_volume_{rel_vol:.2f}x")
             continue
 
-        # 10. Sector concentration
-        sector = _fetch_sector(ticker)
-        if sector and open_sectors.get(sector, 0) >= MAX_SECTOR_POSITIONS:
-            skip(f"sector_full:{sector}")
-            continue
-
         # Build position
         if is_asx:
             entry_price_aud = round(current_price * (1 + SLIPPAGE_PCT / 100), 4)
@@ -329,8 +298,6 @@ def run_entries(week_of: str | None = None) -> None:
         insert_paper_position(pos)
         auto_fill_feedback_entry(opp_id, entry_price_aud)
 
-        if sector:
-            open_sectors[sector] += 1
         open_count += 1
         open_tickers.add(ticker)
         entered += 1
