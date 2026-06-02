@@ -238,6 +238,15 @@ def score_week(week_of: str | None = None) -> list[str]:
         print(f"[score] Gemini error: {e}")
         return []
 
+    picks = [o.get("vehicle", "?") for o in opportunities[:5]]
+    scores = [
+        o.get("conviction", 0) + o.get("asymmetry", 0) + o.get("liquidity", 0) + o.get("timing", 0)
+        for o in opportunities[:5]
+    ]
+    print(f"[score] Gemini returned {len(picks)} picks: " + ", ".join(
+        f"{t} ({s}/20)" for t, s in zip(picks, scores)
+    ))
+
     inserted_ids = []
     already_scored = 0
     no_price = 0
