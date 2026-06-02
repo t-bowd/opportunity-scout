@@ -65,9 +65,11 @@ def _rule_based_summary(signal: dict) -> str:
 
     summaries = {
         "edgar_4":      (
-            f"SEC Form 4 open market purchase filed on {filing_date}. "
-            f"Company: {entity}. An executive or director bought shares on the open market "
-            f"with their own money (transaction code P — discretionary purchase, not a plan or grant). "
+            f"SEC Form 4 insider transaction filed on {filing_date}. "
+            f"Company: {entity}. An executive or director has filed a transaction report — "
+            f"this may be a purchase (bullish: code P, discretionary open market buy) "
+            f"or a sale/disposal (bearish or neutral: code S or D). "
+            f"Only treat as a bullish insider_buy signal if the transaction is clearly an acquisition. "
             f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
         ),
         "edgar_s1":     (
