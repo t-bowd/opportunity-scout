@@ -29,6 +29,13 @@ Each signal names a real company. Your job:
 
 IMPORTANT: Only select opportunities in publicly listed companies with a real, tradeable stock ticker (NYSE, NASDAQ, or ASX). Private companies (e.g. SpaceX, Anthropic, OpenAI, Stripe) cannot be traded and must NOT be selected — skip them entirely. If a signal references a private company and the best angle is a publicly-traded proxy (e.g. a listed supplier or partner), name the proxy company and its ticker instead.
 
+CRITICAL — anchor every pick to its actual signal. The reason to buy IS the signal, not a generic story about the company. Your thesis, catalyst, and plain_english MUST cite the specific concrete fact in the signal:
+- insider_buy: name the role of the buyer (director/officer/10% owner), that it was an open-market purchase (code P), and the filing date. e.g. "A director bought shares on the open market on 2026-06-01" — NOT "China's economy is improving".
+- smart_money (13F): name the fund and that it disclosed holding the position, and acknowledge the data is up to 45 days old.
+- activist: name that an activist disclosed a stake and what they may push for.
+- s1_filed: name that the company filed to go public.
+Do NOT select a company whose only rationale is generic macro or fundamentals ("favourable regulation", "strong product cycle", "improving conditions") with no specific signal behind it. If the signal is just "a Form 4 exists" and you cannot say anything concrete about the purchase, that is a weak pick — score conviction low or drop it. A vague large-cap bull case is exactly what we do NOT want.
+
 Score each dimension 0-5:
 - conviction: How many independent signals support this? Is the insider buying discretionary (open market, code P) or automatic (ESPP/plan)? Discretionary buys score higher. For 13F holdings, remember the data is up to 45 days stale — treat it as confirmation, not a strong standalone signal.
 - asymmetry: What is the upside/downside ratio? Use the price context — a stock already down 50%+ from its 52-week high with analysts near the current price has poor asymmetry. A stock near its high with a clear catalyst has strong asymmetry.
@@ -55,11 +62,11 @@ Respond with a JSON array of up to 5 objects:
     "timing": 2,
     "vehicle": "REAL_TICKER",
     "pattern": "the signal pattern this pick is based on — one of: insider_buy, smart_money, s1_filed, activist, thematic_etf, spin_off, pre_ipo_proxy",
-    "thesis": "3-4 sentences explaining the opportunity.",
-    "catalyst": "What triggers the move.",
+    "thesis": "3-4 sentences. MUST open by stating the specific signal (who bought/which fund/what filing and when), then why it matters.",
+    "catalyst": "The specific signal event that triggers interest (e.g. 'Director open-market purchase filed 2026-06-01'), not a generic macro theme.",
     "invalidation": "What would make you exit.",
     "catalyst_date": "YYYY-MM-DD or null",
-    "plain_english": "2-3 sentences, no jargon, explain it like a smart friend.",
+    "plain_english": "2-3 sentences, no jargon. MUST mention the concrete thing that happened (e.g. 'an executive just bought a chunk of stock with their own money'), not a vague company story.",
     "signal_type_explainer": "One sentence explaining what this signal type means."
   }
 ]

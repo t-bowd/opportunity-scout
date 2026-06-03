@@ -7,7 +7,7 @@ Entry filters (all must pass):
       once liquidity stopped being a heavy score penalty; the market-cap floor
       that guards quality now lives at score time in analyzer/score.py.
   2.  Underlying signal filed within tiered recency window for the pattern
-  3.  Fewer than 5 open positions
+  3.  Fewer than MAX_POSITIONS open positions
   4.  No duplicate ticker already open
   5.  Not already entered for this exact opportunity
   6.  Price fetchable from Yahoo Finance
@@ -55,7 +55,7 @@ DEFAULT_RECENCY = 5
 MIN_SCORE = 13
 BEARISH_MIN_SCORE = 15          # higher bar when broad market is in drawdown
 MARKET_REGIME_THRESHOLD = 0.90  # >10% below 52w high = bearish
-MAX_POSITIONS = 5
+MAX_POSITIONS = 10              # $200 each → up to $2,000 paper capital deployed
 POSITION_SIZE_AUD = 200.0
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7

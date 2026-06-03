@@ -250,15 +250,16 @@ def _build_html(week_of: str) -> str:
     fx_rate = _fetch_fx_rate()
 
     # Open position cards
+    from paper_trader.entry import MAX_POSITIONS
     if open_pos:
         cards = "\n".join(
             _format_position_card(p, opps.get(p.get("opportunity_id", "")), fx_rate)
             for p in open_pos
         )
-        open_html = f"<h2 style='margin:0 0 16px;'>Open Positions ({len(open_pos)}/5 slots)</h2>{cards}"
+        open_html = f"<h2 style='margin:0 0 16px;'>Open Positions ({len(open_pos)}/{MAX_POSITIONS} slots)</h2>{cards}"
     else:
         open_html = (
-            "<h2 style='margin:0 0 8px;'>Open Positions (0/5 slots)</h2>"
+            f"<h2 style='margin:0 0 8px;'>Open Positions (0/{MAX_POSITIONS} slots)</h2>"
             "<p style='color:#888;font-size:13px;'>No open positions this week — "
             "all candidates failed entry filters.</p>"
         )
