@@ -63,13 +63,28 @@ def _rule_based_summary(signal: dict) -> str:
     entity = raw.get("entity_name", "Unknown")
     filing_date = signal.get("signal_date", "")
 
+    # Form 4 signals are now pre-filtered at collection to open-market purchases
+    # only (code P), with buyer/shares/price detail in raw_data — build a concrete,
+    # anchored summary from it.
+    buyer = raw.get("buyer", "An insider")
+    roles = ", ".join(raw.get("roles", ["insider"]))
+    shares = raw.get("shares")
+    price = raw.get("price")
+    value = raw.get("value_usd")
+    f4 = f"{buyer} ({roles}) made an open-market purchase"
+    if shares:
+        f4 += f" of {int(shares):,} shares"
+    f4 += f" of {entity}"
+    if price:
+        f4 += f" at ~${price}/share"
+    if value:
+        f4 += f" (~${int(value):,} total)"
+
     summaries = {
         "edgar_4":      (
-            f"SEC Form 4 insider transaction filed on {filing_date}. "
-            f"Company: {entity}. An executive or director has filed a transaction report — "
-            f"this may be a purchase (bullish: code P, discretionary open market buy) "
-            f"or a sale/disposal (bearish or neutral: code S or D). "
-            f"Only treat as a bullish insider_buy signal if the transaction is clearly an acquisition. "
+            f"SEC Form 4 open-market purchase (transaction code P) filed on {filing_date}. "
+            f"{f4}. The insider bought shares with their own money — a discretionary, "
+            f"bullish signal, not a grant, ESPP, or option exercise. "
             f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
         ),
         "edgar_s1":     (

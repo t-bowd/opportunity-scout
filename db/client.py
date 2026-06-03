@@ -28,6 +28,16 @@ def upsert_entity(ticker: str | None, name: str, entity_type: str) -> str:
     return result.data[0]["id"]
 
 
+def signal_exists(accession_no: str) -> bool:
+    """True if a signal with this accession is already stored. Used to avoid
+    re-fetching Form 4 / 13F filing bodies for filings we've already processed."""
+    db = get_client()
+    result = (
+        db.table("signals").select("id").eq("accession_no", accession_no).limit(1).execute()
+    )
+    return len(result.data) > 0
+
+
 def insert_signal(signal: dict) -> str | None:
     """Insert a signal. Returns id, or None if duplicate."""
     db = get_client()

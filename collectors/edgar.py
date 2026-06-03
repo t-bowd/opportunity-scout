@@ -7,7 +7,7 @@ import re
 import time
 import requests
 from datetime import date, timedelta
-from db.client import insert_signal
+from db.client import insert_signal, signal_exists
 
 ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 
@@ -100,6 +100,92 @@ def _build_signal(hit: dict, form_type: str, pattern: str) -> dict:
         "url": url,
         "raw_data": raw_data,
     }
+
+
+def _fetch_form4_purchase(hit: dict) -> dict | None:
+    """
+    Fetch a Form 4 filing and return open-market purchase detail, or None.
+
+    Only returns a result if the filing contains a non-derivative transaction
+    with code P (discretionary open-market purchase). Grants (code A), sales (S),
+    option exercises (M), gifts (G), tax withholding (F) etc. all return None —
+    they are not the bullish insider-buy signal we want. This is the deterministic
+    replacement for the old "Open Market Purchase" full-text filter, which both
+    missed real buys and let grants/sales through (YUMC director grants slipped in
+    as a 'pick'; FLUT mixed buys and sells).
+    """
+    src = hit.get("_source", {})
+    accession = hit.get("_id", "").split(":")[0]
+    ciks = src.get("ciks", [])
+    if not accession or not ciks:
+        return None
+
+    accnd = accession.replace("-", "")
+    txt = None
+    for c in ciks:
+        url = f"{EDGAR_BASE}/Archives/edgar/data/{int(c)}/{accnd}/{accession}.txt"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code == 200 and "transactionCode" in r.text:
+                txt = r.text
+                break
+        except Exception:
+            continue
+    if not txt:
+        return None
+
+    # Sum shares across non-derivative code-P transactions only
+    total_shares = 0.0
+    price = None
+    for block in re.findall(
+        r"<nonDerivativeTransaction>.*?</nonDerivativeTransaction>", txt, re.DOTALL
+    ):
+        code = re.search(r"<transactionCode>(\w)</transactionCode>", block)
+        if not code or code.group(1) != "P":
+            continue
+        sh = re.search(r"<transactionShares>\s*<value>([\d.]+)", block)
+        pr = re.search(r"<transactionPricePerShare>\s*<value>([\d.]+)", block)
+        if sh:
+            total_shares += float(sh.group(1))
+        if pr and price is None:
+            price = float(pr.group(1))
+
+    if total_shares <= 0:
+        return None  # no open-market purchase in this filing
+
+    owner = re.search(r"<rptOwnerName>(.*?)</rptOwnerName>", txt, re.DOTALL)
+    is_dir = re.search(r"<isDirector>\s*(1|true)\s*</isDirector>", txt, re.I)
+    is_off = re.search(r"<isOfficer>\s*(1|true)\s*</isOfficer>", txt, re.I)
+    is_ten = re.search(r"<isTenPercentOwner>\s*(1|true)\s*</isTenPercentOwner>", txt, re.I)
+    title = re.search(r"<officerTitle>(.*?)</officerTitle>", txt, re.DOTALL)
+    roles = []
+    if is_dir:
+        roles.append("director")
+    if is_off:
+        roles.append(title.group(1).strip() if title and title.group(1).strip() else "officer")
+    if is_ten:
+        roles.append("10% owner")
+
+    return {
+        "buyer": owner.group(1).strip() if owner else "Insider",
+        "roles": roles or ["insider"],
+        "shares": int(total_shares),
+        "price": round(price, 2) if price else None,
+        "value_usd": int(total_shares * price) if price else None,
+    }
+
+
+def _build_form4_signal(hit: dict) -> list[dict]:
+    """One signal per Form 4 — but only if it's an open-market purchase (code P)."""
+    base = _build_signal(hit, "4", "insider_buy")
+    # Skip the (expensive) XML fetch for filings we've already stored
+    if signal_exists(base["accession_no"]):
+        return []
+    purchase = _fetch_form4_purchase(hit)
+    if not purchase:
+        return []  # grant / sale / exercise — not a bullish buy signal
+    base["raw_data"].update(purchase)
+    return [base]
 
 
 def _parse_info_table(xml: str) -> list[dict]:
@@ -220,10 +306,14 @@ def collect(lookback_days: int = 3) -> int:
             form_inserted = 0
             for hit in hits:
                 # 13F: expand into one signal per top holding (the fund name alone
-                # is not tradeable). All other forms: one signal per filing.
+                # is not tradeable). Form 4: only keep open-market purchases (code P).
+                # All other forms: one signal per filing.
                 if form_type == "13F-HR":
                     signals = _build_13f_holding_signals(hit)
                     time.sleep(0.3)  # extra calls per 13F — stay under rate limit
+                elif form_type == "4":
+                    signals = _build_form4_signal(hit)
+                    time.sleep(0.15)  # XML fetch per new Form 4 — stay under rate limit
                 else:
                     signals = [_build_signal(hit, form_type, pattern)]
                 for signal in signals:
