@@ -14,7 +14,7 @@ client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = "gemini-2.5-flash"
 
 PATTERNS_TO_SCORE = {
-    "pre_ipo_proxy", "thematic_etf", "s1_filed",
+    "pre_ipo_proxy", "thematic_etf", "etf_launch", "s1_filed",
     "insider_buy", "activist", "smart_money", "spin_off",
 }
 
@@ -52,6 +52,7 @@ Also write two plain English fields for a retail investor with no finance backgr
   - s1_filed: "This company has filed paperwork to go public on the stock exchange — it's the first official step toward an IPO."
   - activist: "A large investor has taken a significant stake and may push for changes like a sale, restructure, or new leadership."
   - thematic_etf: "A new fund has launched that bets on a specific theme or trend, and it's gaining traction quickly."
+  - etf_launch: "A new exchange-traded fund has been registered with regulators — an early read on a theme big institutions are preparing to offer investors."
 
 Respond with a JSON array of up to 5 objects:
 [
@@ -61,7 +62,7 @@ Respond with a JSON array of up to 5 objects:
     "liquidity": 5,
     "timing": 2,
     "vehicle": "REAL_TICKER",
-    "pattern": "the signal pattern this pick is based on — one of: insider_buy, smart_money, s1_filed, activist, thematic_etf, spin_off, pre_ipo_proxy",
+    "pattern": "the signal pattern this pick is based on — one of: insider_buy, smart_money, s1_filed, activist, thematic_etf, etf_launch, spin_off, pre_ipo_proxy",
     "thesis": "3-4 sentences. MUST open by stating the specific signal (who bought/which fund/what filing and when), then why it matters.",
     "catalyst": "The specific signal event that triggers interest (e.g. 'Director open-market purchase filed 2026-06-01'), not a generic macro theme.",
     "invalidation": "What would make you exit.",
