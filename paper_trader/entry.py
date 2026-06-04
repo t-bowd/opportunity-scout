@@ -55,8 +55,16 @@ DEFAULT_RECENCY = 5
 MIN_SCORE = 13
 BEARISH_MIN_SCORE = 15          # higher bar when broad market is in drawdown
 MARKET_REGIME_THRESHOLD = 0.90  # >10% below 52w high = bearish
-MAX_POSITIONS = 10              # $200 each → up to $2,000 paper capital deployed
-POSITION_SIZE_AUD = 200.0
+MAX_POSITIONS = 10              # secondary cap; the $2,000 pool is the real limit
+
+# Conviction-scaled position sizing. Total paper capital is a $2,000 pool; the
+# default trade is ~$200, but stronger-conviction picks get a larger slice as
+# long as budget remains. Highest-scoring opportunities are processed first
+# (get_recent_opportunities orders by score desc), so they get capital priority.
+TOTAL_POOL_AUD = 2000.0
+BASE_POSITION_AUD = 200.0
+MIN_TRADE_AUD = 150.0           # don't open a position smaller than this
+SIZE_TIERS = [(18, 400.0), (16, 300.0)]  # score >= threshold -> target size; else BASE
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
 SLIPPAGE_PCT = 0.5
@@ -143,6 +151,14 @@ def _market_is_bearish(is_asx: bool) -> bool:
     return False  # fail open
 
 
+def _target_position_size(score: int) -> float:
+    """Conviction-scaled target trade size in AUD (capped by budget at call site)."""
+    for threshold, size in SIZE_TIERS:
+        if score >= threshold:
+            return size
+    return BASE_POSITION_AUD
+
+
 def _recency_ok(opp: dict) -> tuple[bool, str]:
     """True if the opportunity is fresh enough for its pattern type."""
     pattern = opp.get("pattern", "")
@@ -177,8 +193,18 @@ def run_entries(week_of: str | None = None) -> None:
     open_count = len(open_positions)
     open_tickers = {p["ticker"] for p in open_positions}
 
+    # Budget = the $2,000 pool minus what's already deployed in open positions.
+    deployed = sum(
+        float(p["entry_price_aud"]) * p["quantity"] + float(p.get("brokerage_aud", 0))
+        for p in open_positions
+    )
+    remaining_budget = TOTAL_POOL_AUD - deployed
+
     if open_count >= MAX_POSITIONS:
         print(f"[paper/entry] {open_count} positions open — no slots, skipping")
+        return
+    if remaining_budget < MIN_TRADE_AUD:
+        print(f"[paper/entry] ${remaining_budget:.0f} budget left of ${TOTAL_POOL_AUD:.0f} — pool full, skipping")
         return
 
     fx_rate = _fetch_fx_rate()
@@ -280,8 +306,12 @@ def run_entries(week_of: str | None = None) -> None:
             brokerage = US_BROKERAGE_AUD
             market = "US"
 
-        # 11. Minimum 1 share
-        quantity = int(POSITION_SIZE_AUD / entry_price_aud)
+        # 10. Position sizing — conviction-scaled, capped by remaining budget
+        target_aud = min(_target_position_size(score), remaining_budget)
+        if target_aud < MIN_TRADE_AUD:
+            skip("budget_exhausted")
+            break
+        quantity = int(target_aud / entry_price_aud)
         if quantity < 1:
             skip(f"price_too_high_aud:{entry_price_aud:.2f}")
             continue
@@ -304,16 +334,20 @@ def run_entries(week_of: str | None = None) -> None:
         insert_paper_position(pos)
         auto_fill_feedback_entry(opp_id, entry_price_aud)
 
+        cost_aud = entry_price_aud * quantity + brokerage
+        remaining_budget -= cost_aud
         open_count += 1
         open_tickers.add(ticker)
         entered += 1
 
-        cost_aud = entry_price_aud * quantity + brokerage
         regime_note = " [bearish regime]" if bearish else ""
         print(
             f"[paper/entry] ENTER {ticker} ({market}) @ "
             f"${entry_price_aud:.2f} AUD × {quantity} = ${cost_aud:.2f} AUD "
-            f"(score {score}/20{regime_note})"
+            f"(score {score}/20{regime_note}) — ${remaining_budget:.0f} budget left"
         )
 
-    print(f"[paper/entry] done — {entered} entered, {open_count}/{MAX_POSITIONS} open")
+    print(
+        f"[paper/entry] done — {entered} entered, {open_count}/{MAX_POSITIONS} open, "
+        f"${TOTAL_POOL_AUD - remaining_budget:.0f}/${TOTAL_POOL_AUD:.0f} deployed"
+    )

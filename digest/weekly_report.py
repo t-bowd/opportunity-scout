@@ -274,7 +274,7 @@ def _build_html(week_of: str) -> str:
     Opportunity Scout — Week of {week_of}
   </h1>
   <p style="color:#888;font-size:13px;margin-top:0;">
-    Paper portfolio update · $200 AUD positions · automated entry &amp; exit
+    Paper portfolio update · $2,000 pool · ~$200 AUD base, scaled by conviction · automated entry &amp; exit
   </p>
 
   {open_html}

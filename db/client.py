@@ -129,6 +129,21 @@ def get_top_opportunities(week_of: str, limit: int = 5) -> list[dict]:
     )
 
 
+def get_latest_opportunity_by_ticker(vehicle: str) -> dict | None:
+    """Most recently scored opportunity for a ticker — used by manual_open to
+    link a hand-opened position to its thesis/score."""
+    db = get_client()
+    result = (
+        db.table("opportunities")
+        .select("*")
+        .eq("vehicle", vehicle)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
 def get_recent_opportunities(days: int = 10, limit: int = 25) -> list[dict]:
     """
     Opportunities scored within the last `days`, highest score first.

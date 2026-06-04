@@ -1,0 +1,29 @@
+name: Manual Open Positions
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Tickers to open at market. Optional :AMOUNT for custom AUD size (e.g. RYAN XMTR ERIE:350)"
+        required: true
+        type: string
+
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Open named positions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m paper_trader.manual_open ${{ inputs.tickers }}
