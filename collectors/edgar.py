@@ -7,7 +7,7 @@ import re
 import time
 import requests
 from datetime import date, timedelta
-from db.client import insert_signal, signal_exists
+from db.client import insert_signal, signal_exists, filing_has_signals
 
 ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 
@@ -16,6 +16,7 @@ ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 # fund's entire long tail of tiny positions.
 THIRTEEN_F_TOP_N = 5
 THIRTEEN_F_MIN_VALUE_USD = 5_000_000
+THIRTEEN_F_INCREASE_THRESHOLD = 0.20  # +20% shares vs prior quarter counts as "increased"
 
 EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index"
 EDGAR_BASE = "https://www.sec.gov"
@@ -237,13 +238,17 @@ def _parse_info_table(xml: str) -> list[dict]:
         issuer = _tag("nameOfIssuer")
         cusip = _tag("cusip")
         value_raw = _tag("value")
-        shares = _tag("sshPrnamt")
+        shares_raw = _tag("sshPrnamt")
         if not issuer or not value_raw:
             continue
         try:
             value_usd = int(re.sub(r"[^\d]", "", value_raw))
         except ValueError:
             continue
+        try:
+            shares = int(re.sub(r"[^\d]", "", shares_raw)) if shares_raw else 0
+        except ValueError:
+            shares = 0
         holdings.append({
             "issuer": issuer,
             "cusip": cusip,
@@ -253,11 +258,10 @@ def _parse_info_table(xml: str) -> list[dict]:
     return holdings
 
 
-def _fetch_13f_holdings(cik: str, accession: str) -> list[dict]:
+def _fetch_13f_all_holdings(cik: str, accession: str) -> list[dict]:
     """
-    Fetch and parse the information table for a single 13F filing.
-    Returns the top THIRTEEN_F_TOP_N holdings by value (above the min threshold).
-    Fails soft — returns [] on any error so collection continues.
+    Fetch and parse the FULL information table for a single 13F filing —
+    every holding, unfiltered and unsorted. Fails soft (returns []).
     """
     cik_int = str(int(cik))  # strip zero-padding for the archive path
     acc_nodash = accession.replace("-", "")
@@ -268,7 +272,6 @@ def _fetch_13f_holdings(cik: str, accession: str) -> list[dict]:
         items = idx.get("directory", {}).get("item", [])
         xml_names = [it["name"] for it in items if it.get("name", "").lower().endswith(".xml")]
 
-        holdings: list[dict] = []
         for name in xml_names:
             # primary_doc.xml is the cover page, not the holdings table — skip it
             if name.lower() == "primary_doc.xml":
@@ -278,22 +281,54 @@ def _fetch_13f_holdings(cik: str, accession: str) -> list[dict]:
             if "infoTable" in xml:
                 holdings = _parse_info_table(xml)
                 if holdings:
-                    break
+                    return holdings
             time.sleep(0.2)
-
-        holdings = [h for h in holdings if h["value_usd"] >= THIRTEEN_F_MIN_VALUE_USD]
-        holdings.sort(key=lambda h: h["value_usd"], reverse=True)
-        return holdings[:THIRTEEN_F_TOP_N]
     except Exception as e:
         print(f"[edgar] 13F holdings fetch failed for {accession}: {e}")
-        return []
+    return []
+
+
+def _fetch_prior_13f_shares(fund_cik: str, current_accession: str) -> dict[str, int] | None:
+    """
+    Return {cusip: shares} from the fund's PREVIOUS 13F-HR filing, used to diff
+    against the current one. Returns None if there is no prior filing or it can't
+    be fetched — caller then falls back to top-holdings-by-value.
+    """
+    try:
+        url = f"https://data.sec.gov/submissions/CIK{int(fund_cik):010d}.json"
+        data = requests.get(url, headers=HEADERS, timeout=15).json()
+        recent = data.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        accs = recent.get("accessionNumber", [])
+        # recent arrays are newest-first; the first 13F-HR that isn't the current
+        # filing is the prior quarter's.
+        prior_acc = next(
+            (a for f, a in zip(forms, accs)
+             if f in ("13F-HR", "13F-HR/A") and a != current_accession),
+            None,
+        )
+        if not prior_acc:
+            return None
+        prior = _fetch_13f_all_holdings(fund_cik, prior_acc)
+        if not prior:
+            return None
+        shares_by_cusip: dict[str, int] = {}
+        for h in prior:
+            if h.get("cusip"):
+                shares_by_cusip[h["cusip"]] = shares_by_cusip.get(h["cusip"], 0) + h["shares"]
+        return shares_by_cusip
+    except Exception as e:
+        print(f"[edgar] prior 13F fetch failed for CIK {fund_cik}: {e}")
+        return None
 
 
 def _build_13f_holding_signals(hit: dict) -> list[dict]:
     """
-    Turn one 13F filing into one signal per top holding.
-    Replaces the old behaviour of emitting a single useless 'fund name' signal —
-    the fund name alone gave Gemini nothing tradeable to resolve.
+    Turn one 13F filing into signals — but only for positions the fund NEWLY
+    INITIATED or materially INCREASED versus its prior quarter. A fund's long-held
+    mega-cap stakes (Berkshire's Apple, etc.) are not actionable; a fresh or
+    growing position is the actual smart-money signal. Falls back to top holdings
+    by value only when there's no prior filing to diff against.
     """
     src = hit.get("_source", {})
     accession = hit.get("_id", "").split(":")[0]
@@ -301,27 +336,60 @@ def _build_13f_holding_signals(hit: dict) -> list[dict]:
     if not ciks or not accession:
         return []
 
+    base_acc = accession.replace(":", "-")
+    # Skip the (expensive) holdings fetch + diff for filings already processed
+    if filing_has_signals(base_acc):
+        return []
+
+    fund_cik = ciks[0]
     fund_name = _extract_entity_name(src, "13F-HR")
     file_date = src.get("file_date") or date.today().isoformat()
-    holdings = _fetch_13f_holdings(ciks[0], accession)
+
+    current = _fetch_13f_all_holdings(fund_cik, accession)
+    if not current:
+        return []
+
+    prior = _fetch_prior_13f_shares(fund_cik, accession)
+
+    interesting: list[dict] = []
+    for h in current:
+        if h["value_usd"] < THIRTEEN_F_MIN_VALUE_USD:
+            continue
+        cusip = h.get("cusip")
+        if prior is None:
+            change, prior_shares, pct = "held", None, None  # no baseline — keep top by value
+        else:
+            prior_shares = prior.get(cusip, 0)
+            if prior_shares == 0:
+                change, pct = "new", None
+            elif h["shares"] > prior_shares * (1 + THIRTEEN_F_INCREASE_THRESHOLD):
+                change, pct = "increased", round((h["shares"] / prior_shares - 1) * 100)
+            else:
+                continue  # unchanged or trimmed — not a signal
+        interesting.append({**h, "change": change, "prior_shares": prior_shares, "pct_change": pct})
+
+    interesting.sort(key=lambda h: h["value_usd"], reverse=True)
 
     signals = []
-    for h in holdings:
+    for h in interesting[:THIRTEEN_F_TOP_N]:
         # Unique accession per holding so insert_signal's dedup doesn't collapse
         # all holdings from one filing into a single row.
         holding_key = h.get("cusip") or h["issuer"][:12]
         signals.append({
             "source": "edgar_13f_hr",
-            "accession_no": f"{accession.replace(':', '-')}-{holding_key}",
+            "accession_no": f"{base_acc}-{holding_key}",
             "pattern": "smart_money",
             "signal_date": file_date,
-            "url": f"{ARCHIVES_BASE}/{str(int(ciks[0]))}/{accession.replace('-', '')}/",
+            "url": f"{ARCHIVES_BASE}/{str(int(fund_cik))}/{accession.replace('-', '')}/",
             "raw_data": {
                 "entity_name": h["issuer"],     # the held company — what gets scored
                 "fund_name": fund_name,          # who holds it
                 "cusip": h.get("cusip"),
                 "value_usd": h["value_usd"],
-                "shares": h.get("shares"),
+                "shares": h["shares"],
+                "change": h["change"],           # new | increased | held
+                "prior_shares": h.get("prior_shares"),
+                "pct_change": h.get("pct_change"),
             },
         })
     return signals

@@ -56,6 +56,19 @@ Be conservative — if you can't identify a clear pattern, use "irrelevant".
 """
 
 
+def _13f_action(raw: dict, entity: str) -> str:
+    """Describe what the fund did with this position, based on the quarter diff."""
+    fund = raw.get("fund_name", "a large institutional investor")
+    change = raw.get("change")
+    if change == "new":
+        return f"the fund {fund} INITIATED a brand-new position in {entity}"
+    if change == "increased":
+        pct = raw.get("pct_change")
+        bump = f" by ~{pct}%" if pct else ""
+        return f"the fund {fund} INCREASED its position in {entity}{bump}"
+    return f"the fund {fund} disclosed holding a position in {entity}"
+
+
 def _rule_based_summary(signal: dict) -> str:
     """Generate a plain summary for EDGAR signals without calling Gemini."""
     raw = signal.get("raw_data", {})
@@ -103,11 +116,10 @@ def _rule_based_summary(signal: dict) -> str:
             + (ticker_clause if ticker else f"Use the real NYSE/NASDAQ ticker for {entity} if already assigned, otherwise note as pre-IPO.")
         ),
         "edgar_13f_hr": (
-            f"SEC 13F filing on {filing_date}: the fund {raw.get('fund_name', 'a large institutional investor')} "
-            f"disclosed holding a position in {entity} "
+            f"SEC 13F filing on {filing_date}: {_13f_action(raw, entity)} "
             f"(reported value ~${raw.get('value_usd', 0):,} USD). "
-            f"This is one of the fund's larger positions. Note: 13F data is filed up to 45 days after "
-            f"quarter-end, so it is backward-looking — weight it as confirmation, not a fresh catalyst. "
+            f"A newly initiated or materially increased position is a real conviction signal; "
+            f"note 13F data is filed up to 45 days after quarter-end, so it is backward-looking. "
             f"Use the real NYSE/NASDAQ ticker for {entity} (the held company, not the fund) when scoring."
         ),
         "edgar_13d":    (

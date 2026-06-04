@@ -38,6 +38,21 @@ def signal_exists(accession_no: str) -> bool:
     return len(result.data) > 0
 
 
+def filing_has_signals(accession_prefix: str) -> bool:
+    """True if any signal exists whose accession starts with this prefix. 13F
+    holdings store accession as '<base>-<cusip>', so this lets us tell whether a
+    13F filing has already been processed without re-fetching its holdings."""
+    db = get_client()
+    result = (
+        db.table("signals")
+        .select("id")
+        .like("accession_no", f"{accession_prefix}-%")
+        .limit(1)
+        .execute()
+    )
+    return len(result.data) > 0
+
+
 def insert_signal(signal: dict) -> str | None:
     """Insert a signal. Returns id, or None if duplicate."""
     db = get_client()
