@@ -63,6 +63,16 @@ def _rule_based_summary(signal: dict) -> str:
     entity = raw.get("entity_name", "Unknown")
     filing_date = signal.get("signal_date", "")
 
+    # When the collector resolved the issuer's real ticker from its CIK, state it
+    # explicitly so Gemini scores the correct, current symbol instead of guessing
+    # from the company name (which produced stale tickers like ZI for ZoomInfo).
+    ticker = raw.get("ticker")
+    ticker_clause = (
+        f"The tradeable ticker is {ticker} — use exactly this symbol when scoring."
+        if ticker else
+        f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
+    )
+
     # Form 4 signals are now pre-filtered at collection to open-market purchases
     # only (code P), with buyer/shares/price detail in raw_data — build a concrete,
     # anchored summary from it.
@@ -85,12 +95,12 @@ def _rule_based_summary(signal: dict) -> str:
             f"SEC Form 4 open-market purchase (transaction code P) filed on {filing_date}. "
             f"{f4}. The insider bought shares with their own money — a discretionary, "
             f"bullish signal, not a grant, ESPP, or option exercise. "
-            f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
+            f"{ticker_clause}"
         ),
         "edgar_s1":     (
             f"SEC S-1 IPO registration filed by {entity} on {filing_date}. "
             f"This company is planning to go public. "
-            f"Use the real NYSE/NASDAQ ticker for {entity} if already assigned, otherwise note as pre-IPO."
+            + (ticker_clause if ticker else f"Use the real NYSE/NASDAQ ticker for {entity} if already assigned, otherwise note as pre-IPO.")
         ),
         "edgar_13f_hr": (
             f"SEC 13F filing on {filing_date}: the fund {raw.get('fund_name', 'a large institutional investor')} "
@@ -103,15 +113,16 @@ def _rule_based_summary(signal: dict) -> str:
         "edgar_13d":    (
             f"SEC 13D activist filing on {filing_date}. "
             f"An activist investor has taken a significant stake in {entity}. "
-            f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
+            f"{ticker_clause}"
         ),
         "edgar_n1a":    (
             f"SEC N-1A new ETF registration filed by {entity} on {filing_date}. "
-            f"A new fund is being registered. Use the real ticker once assigned."
+            f"A new fund is being registered. "
+            + (ticker_clause if ticker else "Use the real ticker once assigned.")
         ),
         "etf_launch":   (
             f"New ETF launched: {raw.get('title', entity)} on {filing_date}. "
-            f"Use the real NYSE/NASDAQ ticker when scoring."
+            f"{ticker_clause}"
         ),
     }
     return summaries.get(source, f"Signal from {source} for {entity} on {filing_date}.")

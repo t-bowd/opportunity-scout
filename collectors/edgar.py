@@ -34,6 +34,30 @@ FORM_PATTERNS = {
     "13F-HR": "smart_money",    # Quarterly institutional holdings
 }
 
+# SEC's official CIK->ticker map, loaded once and cached. Lets us attach the real
+# tradeable ticker to EDGAR signals (Form 4 issuer, S-1/13D/N-1A filer) so price
+# and volume context reaches the scorer instead of relying on Gemini to resolve a
+# company name (which produced stale tickers like ZI for a renamed ZoomInfo).
+_CIK_TICKER: dict[int, str] | None = None
+COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+
+
+def _cik_to_ticker(cik) -> str | None:
+    """Resolve a CIK to its current ticker via SEC's company_tickers.json."""
+    global _CIK_TICKER
+    if _CIK_TICKER is None:
+        _CIK_TICKER = {}
+        try:
+            data = requests.get(COMPANY_TICKERS_URL, headers=HEADERS, timeout=20).json()
+            _CIK_TICKER = {int(row["cik_str"]): row["ticker"] for row in data.values()}
+        except Exception as e:
+            print(f"[edgar] CIK->ticker map load failed: {e}")
+            _CIK_TICKER = {}
+    try:
+        return _CIK_TICKER.get(int(cik))
+    except (TypeError, ValueError):
+        return None
+
 
 def _edgar_search(form_type: str, start_date: str, end_date: str) -> list[dict]:
     params = {
@@ -91,6 +115,16 @@ def _build_signal(hit: dict, form_type: str, pattern: str) -> dict:
     # Store cleaned entity name alongside raw data for easy access downstream
     raw_data = dict(src)
     raw_data["entity_name"] = entity_name
+
+    # Resolve the real ticker from the issuer/filer CIK. For Form 4 the issuer
+    # (the company whose stock was traded) is the last CIK; for everything else
+    # the filer is the first. Insiders' personal CIKs resolve to None, as expected.
+    ciks = src.get("ciks", [])
+    if ciks:
+        target_cik = ciks[-1] if (form_type == "4" and len(ciks) >= 2) else ciks[0]
+        ticker = _cik_to_ticker(target_cik)
+        if ticker:
+            raw_data["ticker"] = ticker
 
     return {
         "source": f"edgar_{form_type.lower().replace(' ', '_').replace('-', '_')}",
