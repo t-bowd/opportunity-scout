@@ -38,7 +38,7 @@ Do NOT select a company whose only rationale is generic macro or fundamentals ("
 
 Score each dimension 0-5:
 - conviction: How many independent signals support this? Is the insider buying discretionary (open market, code P) or automatic (ESPP/plan)? Discretionary buys score higher. For 13F holdings, remember the data is up to 45 days stale — treat it as confirmation, not a strong standalone signal.
-- asymmetry: What is the upside/downside ratio? Use the price context — a stock already down 50%+ from its 52-week high with analysts near the current price has poor asymmetry. A stock near its high with a clear catalyst has strong asymmetry.
+- asymmetry: What is the upside/downside ratio? Use the price context. A stock in a sustained downtrend — down 30%+ from its 52-week high AND trading near its 52-week low — has POOR asymmetry: an insider buying into that is high-risk "catching a falling knife" (insiders are frequently early and the stock keeps falling), so cap asymmetry at 2 unless there is a specific, dated stabilising catalyst. A stock holding up well, near its high, or basing after a decline with a clear catalyst has strong asymmetry. Negative price momentum should pull this score down even when the insider signal is strong.
 - liquidity: This is a small retail position (~$200). At that size almost any listed stock is tradeable, so score GENEROUSLY and do NOT penalise a company just for being small-cap — small-caps are where the best insider-buy opportunities live. Score 5 for any normally listed NYSE/NASDAQ/ASX stock. Score 2-3 only for genuinely thin situations (nano-cap under ~$50M, OTC/pink-sheet). Score 0 only if there is no real tradeable ticker (e.g. a private company). Liquidity should rarely be the reason a good opportunity scores low.
 - timing: Is there a near-term catalyst? Note: insider buys and 13F holdings often have no dated catalyst — for these, judge timing on how recent the signal is rather than expecting a specific event date, and don't zero it out just because there's no scheduled event.
 
@@ -210,14 +210,28 @@ def score_week(week_of: str | None = None) -> list[str]:
         if ticker_hint:
             px = _get_price_context(ticker_hint)
             if px.get("price"):
-                parts = [f"Current price: ${px['price']}"]
+                price_now = px["price"]
+                parts = [f"Current price: ${price_now}"]
+                pct_from_high = pct_from_low = None
                 if px.get("week52_high"):
-                    pct_from_high = round((px["price"] - px["week52_high"]) / px["week52_high"] * 100, 1)
+                    pct_from_high = round((price_now - px["week52_high"]) / px["week52_high"] * 100, 1)
                     parts.append(f"52-week high: ${px['week52_high']} ({pct_from_high:+.1f}% from high)")
                 if px.get("week52_low"):
-                    parts.append(f"52-week low: ${px['week52_low']}")
+                    pct_from_low = round((price_now - px["week52_low"]) / px["week52_low"] * 100, 1)
+                    parts.append(f"52-week low: ${px['week52_low']} ({pct_from_low:+.1f}% above low)")
                 if px.get("ytd_change_pct") is not None:
                     parts.append(f"YTD: {px['ytd_change_pct']:+.1f}%")
+                # Falling-knife flag: deep drawdown AND sitting near the 52w low.
+                # An insider buying into this is high-risk knife-catching, not a
+                # near-high breakout — call it out so asymmetry is scored honestly.
+                if (pct_from_high is not None and pct_from_high <= -30
+                        and pct_from_low is not None and pct_from_low <= 12):
+                    parts.append(
+                        "⚠ DOWNTREND — deep drawdown and trading near its 52-week low; "
+                        "an insider buying here is high-risk 'catching a falling knife', "
+                        "so score asymmetry and timing conservatively unless there is a "
+                        "specific stabilising catalyst"
+                    )
                 adv = px.get("avg_dollar_volume")
                 if adv:
                     if adv < 1_000_000:
