@@ -13,8 +13,8 @@ Entry filters (all must pass):
   6.  Price fetchable from Yahoo Finance
   7.  Price has not moved >8% since scoring (avoids chasing)
   8.  Not within 7 days of scheduled earnings (avoids binary event risk)
-  9.  Relative volume ≥ 1.5× for news/thematic signals, ≥ 0.8× for EDGAR signals
-      (EDGAR filings are historical — volume spike may have already passed)
+  9.  Relative volume ≥ 1.5× for news/thematic signals (EDGAR signals exempt —
+      the filing is the signal, not today's tape; liquidity gated at score time)
   10. Position size yields at least 1 share at $200 AUD target
 """
 
@@ -63,13 +63,12 @@ SLIPPAGE_PCT = 0.5
 US_BROKERAGE_AUD = 1.0
 ASX_BROKERAGE_AUD = 0.0
 
-# Volume thresholds by pattern type.
-# EDGAR signals (insider buys, 13F, S-1, activist) are historical filings —
-# the volume spike often happens before we process them or not at all.
-# News and thematic signals are current, so the market should react same-day.
+# Relative-volume gate applies to news/thematic signals only — those are current
+# and the market should react same-day. EDGAR signals are driven by the filing,
+# not today's tape, so they are exempt (liquidity is gated by the avg-dollar-volume
+# floor at score time instead).
 EDGAR_PATTERNS = {"insider_buy", "smart_money", "s1_filed", "activist", "etf_launch", "spin_off"}
 MIN_RELATIVE_VOLUME_NEWS = 1.5   # news/thematic: must be 1.5× avg
-MIN_RELATIVE_VOLUME_EDGAR = 0.8  # EDGAR: just needs some activity
 
 HEADERS = {"User-Agent": "OpportunityScout"}
 
@@ -109,12 +108,17 @@ def _fetch_price_and_earnings(ticker: str) -> tuple[float | None, int | None]:
 
 
 def _fetch_relative_volume(ticker: str) -> float | None:
-    """Today's volume / 20-day average. Returns None if unavailable."""
+    """
+    Most recent complete session's volume / trailing average. Returns None if
+    unavailable. Drops zero-volume bars — the daily cron runs around US market
+    close, so the latest bar is often empty/incomplete and would otherwise read
+    as 0.00x and spuriously fail the filter.
+    """
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1mo"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         volumes = resp.json()["chart"]["result"][0]["indicators"]["quote"][0].get("volume", [])
-        volumes = [v for v in volumes if v is not None]
+        volumes = [v for v in volumes if v]  # drop None and 0 (incomplete bars)
         if len(volumes) < 5:
             return None
         avg = sum(volumes[:-1]) / len(volumes[:-1])
@@ -251,16 +255,18 @@ def run_entries(week_of: str | None = None) -> None:
             skip(f"earnings_in_{days_to_earnings}d")
             continue
 
-        # 9. Relative volume — threshold depends on pattern type
+        # 9. Relative volume — momentum confirmation for NEWS/THEMATIC signals only.
+        # EDGAR signals (insider buys, 13F, activist) are driven by the filing, not
+        # today's tape, and the avg-dollar-volume floor at score time already gates
+        # liquidity. Applying an intraday relative-volume gate to them wrongly
+        # rejected very liquid names (RYAN ~$84M/day, XMTR ~$100M/day) on a merely
+        # quiet session — exactly the genuine insider buys we want to enter.
         pattern = opp.get("pattern", "")
-        vol_threshold = (
-            MIN_RELATIVE_VOLUME_EDGAR if pattern in EDGAR_PATTERNS
-            else MIN_RELATIVE_VOLUME_NEWS
-        )
-        rel_vol = _fetch_relative_volume(ticker)
-        if rel_vol is not None and rel_vol < vol_threshold:
-            skip(f"low_relative_volume_{rel_vol:.2f}x")
-            continue
+        if pattern not in EDGAR_PATTERNS:
+            rel_vol = _fetch_relative_volume(ticker)
+            if rel_vol is not None and rel_vol < MIN_RELATIVE_VOLUME_NEWS:
+                skip(f"low_relative_volume_{rel_vol:.2f}x")
+                continue
 
         # Build position
         if is_asx:
