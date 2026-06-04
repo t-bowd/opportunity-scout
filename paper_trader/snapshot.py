@@ -22,8 +22,12 @@ def run_snapshot() -> None:
         for p in open_pos
     )
 
+    # Manual closes are interventions (e.g. flushing a position opened on a
+    # mislabeled signal), not strategy outcomes — exclude them from the
+    # performance sample so they don't pollute expectancy / win rate / graduation.
     closed_pnls = [
-        float(p["pnl_aud"]) for p in closed_pos if p.get("pnl_aud") is not None
+        float(p["pnl_aud"]) for p in closed_pos
+        if p.get("pnl_aud") is not None and p.get("status") != "closed_manual"
     ]
     total_pnl = sum(closed_pnls)
     wins = sum(1 for pnl in closed_pnls if pnl > 0)
