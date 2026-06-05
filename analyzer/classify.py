@@ -86,58 +86,66 @@ def _rule_based_summary(signal: dict) -> str:
         f"Use the real NYSE/NASDAQ ticker for {entity} when scoring."
     )
 
-    # Form 4 signals are now pre-filtered at collection to open-market purchases
-    # only (code P), with buyer/shares/price detail in raw_data — build a concrete,
-    # anchored summary from it.
-    buyer = raw.get("buyer", "An insider")
-    roles = ", ".join(raw.get("roles", ["insider"]))
-    shares = raw.get("shares")
-    price = raw.get("price")
-    value = raw.get("value_usd")
-    f4 = f"{buyer} ({roles}) made an open-market purchase"
-    if shares:
-        f4 += f" of {int(shares):,} shares"
-    f4 += f" of {entity}"
-    if price:
-        f4 += f" at ~${price}/share"
-    if value:
-        f4 += f" (~${int(value):,} total)"
-
-    summaries = {
-        "edgar_4":      (
+    # Dispatch by source — build ONLY the matching summary. (Building all f-strings
+    # eagerly previously crashed: a Form 4 with no price stores value_usd=None, and
+    # the 13F line's "value_usd:," format blew up on it even for Form 4 signals.)
+    if source == "edgar_4":
+        buyer = raw.get("buyer", "An insider")
+        roles = ", ".join(raw.get("roles") or ["insider"])
+        shares = raw.get("shares")
+        price = raw.get("price")
+        value = raw.get("value_usd")
+        f4 = f"{buyer} ({roles}) made an open-market purchase"
+        if shares:
+            f4 += f" of {int(shares):,} shares"
+        f4 += f" of {entity}"
+        if price:
+            f4 += f" at ~${price}/share"
+        if value:
+            f4 += f" (~${int(value):,} total)"
+        return (
             f"SEC Form 4 open-market purchase (transaction code P) filed on {filing_date}. "
             f"{f4}. The insider bought shares with their own money — a discretionary, "
-            f"bullish signal, not a grant, ESPP, or option exercise. "
-            f"{ticker_clause}"
-        ),
-        "edgar_s1":     (
+            f"bullish signal, not a grant, ESPP, or option exercise. {ticker_clause}"
+        )
+
+    if source == "edgar_s1":
+        return (
             f"SEC S-1 IPO registration filed by {entity} on {filing_date}. "
             f"This company is planning to go public. "
-            + (ticker_clause if ticker else f"Use the real NYSE/NASDAQ ticker for {entity} if already assigned, otherwise note as pre-IPO.")
-        ),
-        "edgar_13f_hr": (
+            + (ticker_clause if ticker
+               else f"Use the real NYSE/NASDAQ ticker for {entity} if already assigned, otherwise note as pre-IPO.")
+        )
+
+    if source == "edgar_13f_hr":
+        value = raw.get("value_usd") or 0
+        return (
             f"SEC 13F filing on {filing_date}: {_13f_action(raw, entity)} "
-            f"(reported value ~${raw.get('value_usd', 0):,} USD). "
+            f"(reported value ~${value:,} USD). "
             f"A newly initiated or materially increased position is a real conviction signal; "
             f"note 13F data is filed up to 45 days after quarter-end, so it is backward-looking. "
             f"Use the real NYSE/NASDAQ ticker for {entity} (the held company, not the fund) when scoring."
-        ),
-        "edgar_13d":    (
+        )
+
+    if source == "edgar_13d":
+        return (
             f"SEC 13D activist filing on {filing_date}. "
-            f"An activist investor has taken a significant stake in {entity}. "
-            f"{ticker_clause}"
-        ),
-        "edgar_n1a":    (
+            f"An activist investor has taken a significant stake in {entity}. {ticker_clause}"
+        )
+
+    if source == "edgar_n1a":
+        return (
             f"SEC N-1A new ETF registration filed by {entity} on {filing_date}. "
             f"A new fund is being registered. "
             + (ticker_clause if ticker else "Use the real ticker once assigned.")
-        ),
-        "etf_launch":   (
-            f"New ETF launched: {raw.get('title', entity)} on {filing_date}. "
-            f"{ticker_clause}"
-        ),
-    }
-    return summaries.get(source, f"Signal from {source} for {entity} on {filing_date}.")
+        )
+
+    if source == "etf_launch":
+        return (
+            f"New ETF launched: {raw.get('title', entity)} on {filing_date}. {ticker_clause}"
+        )
+
+    return f"Signal from {source} for {entity} on {filing_date}."
 
 
 def classify_signal_with_llm(signal: dict) -> dict | None:
