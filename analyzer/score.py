@@ -221,16 +221,21 @@ def score_week(week_of: str | None = None) -> list[str]:
                     parts.append(f"52-week low: ${px['week52_low']} ({pct_from_low:+.1f}% above low)")
                 if px.get("ytd_change_pct") is not None:
                     parts.append(f"YTD: {px['ytd_change_pct']:+.1f}%")
-                # Falling-knife flag: deep drawdown AND sitting near the 52w low.
-                # An insider buying into this is high-risk knife-catching, not a
-                # near-high breakout — call it out so asymmetry is scored honestly.
-                if (pct_from_high is not None and pct_from_high <= -30
-                        and pct_from_low is not None and pct_from_low <= 12):
+                # Falling-knife flag. Being pinned to the 52-week low is itself a
+                # downtrend signal (primary), as is a very deep drawdown that hasn't
+                # meaningfully recovered (secondary). A stock that has based and
+                # rallied well off its low is spared — that's a recovery, not a knife.
+                near_low = pct_from_low is not None and pct_from_low <= 10
+                deep_dd = (
+                    pct_from_high is not None and pct_from_high <= -40
+                    and pct_from_low is not None and pct_from_low <= 25
+                )
+                if near_low or deep_dd:
                     parts.append(
-                        "⚠ DOWNTREND — deep drawdown and trading near its 52-week low; "
-                        "an insider buying here is high-risk 'catching a falling knife', "
-                        "so score asymmetry and timing conservatively unless there is a "
-                        "specific stabilising catalyst"
+                        "⚠ DOWNTREND — trading at/near its 52-week low in a sustained "
+                        "decline; an insider buying here is high-risk 'catching a falling "
+                        "knife', so score asymmetry conservatively (cap at 2) and don't let "
+                        "timing rescue it unless there is a specific stabilising catalyst"
                     )
                 adv = px.get("avg_dollar_volume")
                 if adv:
