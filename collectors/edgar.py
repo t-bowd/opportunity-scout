@@ -60,6 +60,37 @@ def _cik_to_ticker(cik) -> str | None:
         return None
 
 
+_TICKER_CIK: dict[str, int] | None = None
+_SIC_CACHE: dict[str, str | None] = {}
+
+
+def get_sector_key(ticker: str) -> str | None:
+    """
+    Coarse sector key — the SIC major group (first 2 digits of the SIC code) for a
+    ticker, via SEC submissions data. Used to cap how many open positions we hold
+    in one sector. Returns None for tickers the SEC doesn't cover (e.g. ASX), so
+    those simply aren't sector-capped. Cached per process.
+    """
+    global _TICKER_CIK
+    if ticker in _SIC_CACHE:
+        return _SIC_CACHE[ticker]
+    if _TICKER_CIK is None:
+        _cik_to_ticker(0)  # ensure the CIK->ticker map is loaded
+        _TICKER_CIK = {v.upper(): k for k, v in (_CIK_TICKER or {}).items()}
+    sic2 = None
+    cik = _TICKER_CIK.get(ticker.upper())
+    if cik:
+        try:
+            url = f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json"
+            sic = requests.get(url, headers=HEADERS, timeout=15).json().get("sic")
+            if sic:
+                sic2 = str(sic)[:2]
+        except Exception:
+            pass
+    _SIC_CACHE[ticker] = sic2
+    return sic2
+
+
 def _edgar_search(form_type: str, start_date: str, end_date: str) -> list[dict]:
     params = {
         "forms": form_type,

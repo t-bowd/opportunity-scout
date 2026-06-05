@@ -15,14 +15,17 @@ Entry filters (all must pass):
   8.  Not within 7 days of scheduled earnings (avoids binary event risk)
   8b. Not a falling knife (at/near 52-week low or deep unrecovered drawdown),
       unless it's a multi-insider conviction cluster
+  8c. Sector not already at MAX_SECTOR_POSITIONS open positions (SIC major group)
   9.  Relative volume ≥ 1.5× for news/thematic signals (EDGAR signals exempt —
       the filing is the signal, not today's tape; liquidity gated at score time)
   10. Position size yields at least 1 share at $200 AUD target
 """
 
 import requests
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
+from collectors.edgar import get_sector_key
 from db.client import (
     get_recent_opportunities,
     get_open_paper_positions,
@@ -89,6 +92,11 @@ FALLING_KNIFE_ABOVE_LOW_PCT = 10.0       # within 10% of 52w low = downtrend
 FALLING_KNIFE_DEEP_DD_PCT = -40.0        # >=40% below 52w high ...
 FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT = 25.0  # ... and not meaningfully recovered
 CLUSTER_MIN_BUYERS = 2                    # distinct insiders to override the block
+
+# Sector diversification — cap open positions per SIC major group. Insider buying
+# clusters by sector (right now: regional banks), so without this the book could
+# load up on one industry. None for tickers SEC doesn't classify (e.g. ASX).
+MAX_SECTOR_POSITIONS = 3
 
 HEADERS = {"User-Agent": "OpportunityScout"}
 
@@ -236,6 +244,13 @@ def run_entries(week_of: str | None = None) -> None:
     )
     remaining_budget = TOTAL_POOL_AUD - deployed
 
+    # Sector counts across open positions (for the diversification cap)
+    open_sectors: Counter = Counter()
+    for p in open_positions:
+        sk = get_sector_key(p["ticker"])
+        if sk:
+            open_sectors[sk] += 1
+
     if open_count >= MAX_POSITIONS:
         print(f"[paper/entry] {open_count} positions open — no slots, skipping")
         return
@@ -329,6 +344,12 @@ def run_entries(week_of: str | None = None) -> None:
                 skip("falling_knife")
                 continue
 
+        # 8c. Sector diversification — don't over-concentrate in one industry
+        sector = get_sector_key(ticker)
+        if sector and open_sectors.get(sector, 0) >= MAX_SECTOR_POSITIONS:
+            skip(f"sector_full:{sector}")
+            continue
+
         # 9. Relative volume — momentum confirmation for NEWS/THEMATIC signals only.
         # EDGAR signals (insider buys, 13F, activist) are driven by the filing, not
         # today's tape, and the avg-dollar-volume floor at score time already gates
@@ -385,6 +406,8 @@ def run_entries(week_of: str | None = None) -> None:
         remaining_budget -= cost_aud
         open_count += 1
         open_tickers.add(ticker)
+        if sector:
+            open_sectors[sector] += 1
         entered += 1
 
         regime_note = " [bearish regime]" if bearish else ""
