@@ -18,6 +18,13 @@ PATTERNS_TO_SCORE = {
     "insider_buy", "activist", "smart_money", "spin_off",
 }
 
+# Cap how many signals go into one scoring prompt. Sending every processed signal
+# for the week (420+ during the pre-fix backlog) burned Gemini credits and fired a
+# Yahoo price fetch per signal. We dedupe by company (keep the most recent) and
+# take the freshest MAX_SIGNALS_TO_SCORE — recent signals are what we can still act
+# on anyway, and the stale backlog ages out of the week window naturally.
+MAX_SIGNALS_TO_SCORE = 60
+
 SCORING_PROMPT = """You are scoring stock market opportunities for a retail investor based in Australia.
 
 You will receive signals from SEC filings (Form 4 insider buys, S-1 IPOs, 13F institutional holdings, 13D activist stakes) and financial news including Australian sources (ASX announcements, SMH, ABC Business).
@@ -100,6 +107,25 @@ def _fetch_week_signals(week_of: str) -> list[dict]:
         .execute()
     )
     return result.data
+
+
+def _prioritize_signals(signals: list[dict], cap: int) -> list[dict]:
+    """
+    Dedupe signals by company (keeping the most recent per company) and return the
+    freshest `cap`. Annotates each kept signal with `_dup_count` = how many signals
+    referenced that company this week, so insider clusters can be surfaced to Gemini.
+    """
+    signals = sorted(signals, key=lambda s: s.get("signal_date", ""), reverse=True)
+    by_key: dict[str, dict] = {}
+    order: list[str] = []
+    for s in signals:
+        raw = s.get("raw_data") or {}
+        key = raw.get("ticker") or raw.get("vehicle") or raw.get("entity_name") or s.get("id")
+        if key not in by_key:
+            by_key[key] = s
+            order.append(key)
+        by_key[key]["_dup_count"] = by_key[key].get("_dup_count", 0) + 1
+    return [by_key[k] for k in order[:cap]]
 
 
 def _log_week_signal_breakdown(week_of: str) -> None:
@@ -197,13 +223,21 @@ def score_week(week_of: str | None = None) -> list[str]:
     if not signals:
         print(f"[score] no scoreable signals for week {week_of} — all classified as irrelevant/non-scoreable patterns")
         return []
-    print(f"[score] sending {len(signals)} signals to Gemini for scoring")
+    total_found = len(signals)
+    signals = _prioritize_signals(signals, MAX_SIGNALS_TO_SCORE)
+    print(f"[score] sending {len(signals)} signals to Gemini for scoring "
+          f"(deduped/capped from {total_found})")
 
     # Build per-signal summaries enriched with price context where available.
     # Tickers are extracted from raw_data entity_name hints; Gemini resolves
     # the real ticker during scoring, so we do a best-effort lookup here.
     def _signal_summary(s: dict) -> str:
         base = f"[{s['source']} / {s['pattern']}] {s['summary'] or json.dumps(s['raw_data'])[:300]}"
+        # Surface insider clusters: multiple Form 4 buys of the same company this
+        # week is a materially stronger conviction signal than a lone purchase.
+        dup = s.get("_dup_count", 1)
+        if s.get("pattern") == "insider_buy" and dup > 1:
+            base += f"\n  CLUSTER: {dup} separate insider purchase filings for this company this week — stronger conviction."
         # Try to get a ticker hint from raw_data for price context
         raw = s.get("raw_data", {})
         ticker_hint = raw.get("vehicle") or raw.get("ticker")
