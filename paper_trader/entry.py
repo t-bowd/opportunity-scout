@@ -13,6 +13,8 @@ Entry filters (all must pass):
   6.  Price fetchable from Yahoo Finance
   7.  Price has not moved >8% since scoring (avoids chasing)
   8.  Not within 7 days of scheduled earnings (avoids binary event risk)
+  8b. Not a falling knife (at/near 52-week low or deep unrecovered drawdown),
+      unless it's a multi-insider conviction cluster
   9.  Relative volume ≥ 1.5× for news/thematic signals (EDGAR signals exempt —
       the filing is the signal, not today's tape; liquidity gated at score time)
   10. Position size yields at least 1 share at $200 AUD target
@@ -28,6 +30,7 @@ from db.client import (
     insert_paper_skipped,
     paper_position_exists_for_opportunity,
     auto_fill_feedback_entry,
+    count_recent_insider_buyers,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,6 +80,15 @@ ASX_BROKERAGE_AUD = 0.0
 # floor at score time instead).
 EDGAR_PATTERNS = {"insider_buy", "smart_money", "s1_filed", "activist", "etf_launch", "spin_off"}
 MIN_RELATIVE_VOLUME_NEWS = 1.5   # news/thematic: must be 1.5× avg
+
+# Falling-knife guard: skip picks in a sustained downtrend (pinned to the 52-week
+# low, or a deep unrecovered drawdown). Buying these underperforms even with an
+# insider signal — EXCEPT a genuine multi-insider conviction cluster, which is
+# allowed to override the block.
+FALLING_KNIFE_ABOVE_LOW_PCT = 10.0       # within 10% of 52w low = downtrend
+FALLING_KNIFE_DEEP_DD_PCT = -40.0        # >=40% below 52w high ...
+FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT = 25.0  # ... and not meaningfully recovered
+CLUSTER_MIN_BUYERS = 2                    # distinct insiders to override the block
 
 HEADERS = {"User-Agent": "OpportunityScout"}
 
@@ -133,6 +145,30 @@ def _fetch_relative_volume(ticker: str) -> float | None:
         return volumes[-1] / avg if avg > 0 else None
     except Exception:
         return None
+
+
+def _is_falling_knife(ticker: str) -> bool:
+    """
+    True if the stock is in a sustained downtrend: trading within
+    FALLING_KNIFE_ABOVE_LOW_PCT of its 52-week low, or in a deep drawdown that
+    hasn't recovered. Fails open (returns False) on any data issue.
+    """
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1y"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        data = resp.json()["chart"]["result"][0]
+        closes = [c for c in data["indicators"]["quote"][0].get("close", []) if c]
+        price = data["meta"].get("regularMarketPrice")
+        if not closes or not price:
+            return False
+        hi, lo = max(closes), min(closes)
+        from_high = (price - hi) / hi * 100
+        above_low = (price - lo) / lo * 100
+        near_low = above_low <= FALLING_KNIFE_ABOVE_LOW_PCT
+        deep_dd = from_high <= FALLING_KNIFE_DEEP_DD_PCT and above_low <= FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT
+        return near_low or deep_dd
+    except Exception:
+        return False  # fail open — don't block a trade on a data hiccup
 
 
 def _market_is_bearish(is_asx: bool) -> bool:
@@ -281,13 +317,24 @@ def run_entries(week_of: str | None = None) -> None:
             skip(f"earnings_in_{days_to_earnings}d")
             continue
 
+        pattern = opp.get("pattern", "")
+
+        # 8b. Falling-knife guard — don't buy into a sustained downtrend. A genuine
+        # multi-insider conviction cluster overrides the block; a lone insider does not.
+        if _is_falling_knife(ticker):
+            buyers = count_recent_insider_buyers(ticker) if pattern == "insider_buy" else 0
+            if buyers >= CLUSTER_MIN_BUYERS:
+                print(f"[paper/entry] {ticker} is a falling knife but a {buyers}-insider cluster — allowing")
+            else:
+                skip("falling_knife")
+                continue
+
         # 9. Relative volume — momentum confirmation for NEWS/THEMATIC signals only.
         # EDGAR signals (insider buys, 13F, activist) are driven by the filing, not
         # today's tape, and the avg-dollar-volume floor at score time already gates
         # liquidity. Applying an intraday relative-volume gate to them wrongly
         # rejected very liquid names (RYAN ~$84M/day, XMTR ~$100M/day) on a merely
         # quiet session — exactly the genuine insider buys we want to enter.
-        pattern = opp.get("pattern", "")
         if pattern not in EDGAR_PATTERNS:
             rel_vol = _fetch_relative_volume(ticker)
             if rel_vol is not None and rel_vol < MIN_RELATIVE_VOLUME_NEWS:

@@ -129,6 +129,32 @@ def get_top_opportunities(week_of: str, limit: int = 5) -> list[dict]:
     )
 
 
+def count_recent_insider_buyers(ticker: str, days: int = 14) -> int:
+    """
+    Number of DISTINCT insiders who made open-market purchases of this ticker in
+    the last `days`. Used by the entry filter to tell a lone insider buying a
+    falling stock (weak) from a multi-insider conviction cluster (strong enough
+    to override the falling-knife block).
+    """
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    db = get_client()
+    rows = (
+        db.table("signals")
+        .select("raw_data")
+        .eq("source", "edgar_4")
+        .gte("signal_date", cutoff)
+        .execute()
+        .data
+    )
+    buyers = set()
+    for r in rows:
+        rd = r.get("raw_data") or {}
+        if rd.get("ticker") == ticker and rd.get("buyer"):
+            buyers.add(rd["buyer"])
+    return len(buyers)
+
+
 def get_latest_opportunity_by_ticker(vehicle: str) -> dict | None:
     """Most recently scored opportunity for a ticker — used by manual_open to
     link a hand-opened position to its thesis/score."""
