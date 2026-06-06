@@ -34,6 +34,7 @@ from paper_trader.entry import (
     TOTAL_POOL_AUD,
     MIN_TRADE_AUD,
 )
+from paper_trader.notify import notify_opened
 
 
 def _parse_arg(arg: str) -> tuple[str, float | None]:
@@ -126,6 +127,8 @@ def open_positions(args: list[str]) -> None:
             f"× {quantity} = ${cost_aud:.2f} AUD (score {score}/20) — "
             f"${remaining_budget:.0f} budget left"
         )
+        notify_opened(ticker, market, entry_price_aud, quantity, cost_aud, score,
+                      opp.get("pattern", "unknown"), opp.get("plain_english", ""))
 
 
 if __name__ == "__main__":

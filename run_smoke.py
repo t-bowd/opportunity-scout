@@ -55,6 +55,7 @@ def _imports():
     import analyzer.score            # noqa: F401
     import paper_trader.entry        # noqa: F401
     import paper_trader.exit         # noqa: F401
+    import paper_trader.notify       # noqa: F401
     import paper_trader.snapshot     # noqa: F401
     import paper_trader.manual_open  # noqa: F401
     import paper_trader.manual_close # noqa: F401

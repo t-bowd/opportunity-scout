@@ -26,6 +26,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
 from collectors.edgar import get_sector_key
+from paper_trader.notify import notify_opened
 from db.client import (
     get_recent_opportunities,
     get_open_paper_positions,
@@ -416,6 +417,8 @@ def run_entries(week_of: str | None = None) -> None:
             f"${entry_price_aud:.2f} AUD × {quantity} = ${cost_aud:.2f} AUD "
             f"(score {score}/20{regime_note}) — ${remaining_budget:.0f} budget left"
         )
+        notify_opened(ticker, market, entry_price_aud, quantity, cost_aud, score,
+                      opp.get("pattern", "unknown"), opp.get("plain_english", ""))
 
     print(
         f"[paper/entry] done — {entered} entered, {open_count}/{MAX_POSITIONS} open, "

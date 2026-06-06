@@ -18,6 +18,7 @@ from datetime import date, datetime, timezone
 
 from db.client import get_open_paper_positions, close_paper_position
 from paper_trader.exit import _fetch_price, _fetch_fx_rate, SLIPPAGE_PCT
+from paper_trader.notify import notify_closed
 
 
 def close_positions(tickers: list[str]) -> None:
@@ -52,6 +53,8 @@ def close_positions(tickers: list[str]) -> None:
 
         pnl_aud = round((exit_price_aud - entry_price_aud) * quantity - brokerage, 2)
         pnl_pct = round((exit_price_aud - entry_price_aud) / entry_price_aud * 100, 2)
+        entry_date = pos.get("entry_date")
+        days_held = (today - date.fromisoformat(entry_date)).days if entry_date else 0
 
         close_paper_position(pos["id"], {
             "status": "closed_manual",
@@ -64,6 +67,7 @@ def close_positions(tickers: list[str]) -> None:
             "updated_at": now_iso,
         })
         print(f"[manual_close] CLOSED {ticker} — {pnl_pct:+.1f}% / ${pnl_aud:+.2f} AUD")
+        notify_closed(ticker, "manual", pnl_aud, pnl_pct, days_held)
 
 
 if __name__ == "__main__":

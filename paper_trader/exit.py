@@ -16,6 +16,7 @@ from db.client import (
     update_paper_position_peak,
     auto_fill_feedback_exit,
 )
+from paper_trader.notify import notify_closed
 
 TRAILING_STOP_ACTIVATE_PCT = 30.0   # activate trailing stop once up 30%
 TRAILING_STOP_TRAIL_PCT    = 15.0   # exit if price falls 15% below peak
@@ -158,3 +159,4 @@ def run_exits() -> None:
             f"[paper/exit] CLOSED {ticker} ({exit_reason}) — "
             f"{pnl_pct:+.1f}% / ${pnl_aud:+.2f} AUD after {days_held}d"
         )
+        notify_closed(ticker, exit_reason, pnl_aud, pnl_pct, days_held)
