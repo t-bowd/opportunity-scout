@@ -89,8 +89,9 @@ MIN_RELATIVE_VOLUME_NEWS = 1.5   # news/thematic: must be 1.5× avg
 # low, or a deep unrecovered drawdown). Buying these underperforms even with an
 # insider signal — EXCEPT a genuine multi-insider conviction cluster, which is
 # allowed to override the block.
-FALLING_KNIFE_ABOVE_LOW_PCT = 10.0       # within 10% of 52w low = downtrend
-FALLING_KNIFE_DEEP_DD_PCT = -40.0        # >=40% below 52w high ...
+FALLING_KNIFE_ABOVE_LOW_PCT = 10.0       # within 10% of 52w low ...
+FALLING_KNIFE_MIN_DRAWDOWN_PCT = -15.0   # ... AND >=15% off the high (real downtrend, not a flat/SPAC stock)
+FALLING_KNIFE_DEEP_DD_PCT = -40.0        # or >=40% below 52w high ...
 FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT = 25.0  # ... and not meaningfully recovered
 CLUSTER_MIN_BUYERS = 2                    # distinct insiders to override the block
 
@@ -173,7 +174,7 @@ def _is_falling_knife(ticker: str) -> bool:
         hi, lo = max(closes), min(closes)
         from_high = (price - hi) / hi * 100
         above_low = (price - lo) / lo * 100
-        near_low = above_low <= FALLING_KNIFE_ABOVE_LOW_PCT
+        near_low = above_low <= FALLING_KNIFE_ABOVE_LOW_PCT and from_high <= FALLING_KNIFE_MIN_DRAWDOWN_PCT
         deep_dd = from_high <= FALLING_KNIFE_DEEP_DD_PCT and above_low <= FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT
         return near_low or deep_dd
     except Exception:

@@ -259,7 +259,13 @@ def score_week(week_of: str | None = None) -> list[str]:
                 # downtrend signal (primary), as is a very deep drawdown that hasn't
                 # meaningfully recovered (secondary). A stock that has based and
                 # rallied well off its low is spared — that's a recovery, not a knife.
-                near_low = pct_from_low is not None and pct_from_low <= 10
+                # Near the low AND meaningfully off the high (a real downtrend) —
+                # the drawdown requirement avoids flagging flat stocks whose high
+                # and low are both ~the same (e.g. a SPAC pinned at $10).
+                near_low = (
+                    pct_from_low is not None and pct_from_low <= 10
+                    and pct_from_high is not None and pct_from_high <= -15
+                )
                 deep_dd = (
                     pct_from_high is not None and pct_from_high <= -40
                     and pct_from_low is not None and pct_from_low <= 25
@@ -331,6 +337,7 @@ def score_week(week_of: str | None = None) -> list[str]:
     already_scored = 0
     no_price = 0
     too_small = 0
+    spac_skipped = 0
 
     for opp in opportunities[:5]:
         ticker = opp.get("vehicle")
@@ -361,6 +368,19 @@ def score_week(week_of: str | None = None) -> list[str]:
         if adv is not None and adv < MIN_DOLLAR_VOLUME:
             print(f"[score] {ticker} avg volume ${adv/1e6:.2f}M/day below floor — skipping")
             too_small += 1
+            continue
+
+        # Skip SPACs / blank-check shells. They trade dead flat at ~$10 (trust
+        # value) with no price discovery, and an "insider buy" is just the sponsor
+        # buying their own shell — not the operating-company signal we want.
+        # Signature: near-zero 52-week range in the $9-11 band, or a unit/warrant/
+        # rights ticker (suffix U/W/R on a multi-letter symbol, e.g. IPVVU).
+        hi, lo = px.get("week52_high"), px.get("week52_low")
+        flat_at_ten = (hi and lo and lo > 0 and (hi - lo) / lo < 0.08 and 9.0 <= price <= 11.0)
+        unit_ticker = len(ticker) >= 5 and ticker[-1] in ("U", "W", "R")
+        if flat_at_ten or unit_ticker:
+            print(f"[score] {ticker} looks like a SPAC/unit — skipping")
+            spac_skipped += 1
             continue
 
         # Use the pattern Gemini attributed to this specific pick (validated
@@ -401,7 +421,8 @@ def score_week(week_of: str | None = None) -> list[str]:
     print(
         f"[score] done — {len(inserted_ids)} inserted, "
         f"{already_scored} already scored this week, "
-        f"{no_price} skipped (no price), {too_small} skipped (too small)"
+        f"{no_price} skipped (no price), {too_small} skipped (too small), "
+        f"{spac_skipped} skipped (SPAC/unit)"
     )
     return inserted_ids
 
