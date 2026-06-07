@@ -73,7 +73,10 @@ def _format_position_card(pos: dict, opp: dict | None, fx_rate: float) -> str:
     entry_date = pos.get("entry_date", "")
     days_held = (date.today() - date.fromisoformat(entry_date)).days if entry_date else "?"
     score = pos.get("score_at_entry", "?")
-    pattern = pos.get("pattern", "").replace("_", " ").title()
+    raw_pattern = pos.get("pattern", "")
+    pattern = raw_pattern.replace("_", " ").title()
+    from paper_trader.exit import MAX_HOLD_DAYS_BY_PATTERN, DEFAULT_MAX_HOLD_DAYS
+    max_hold = MAX_HOLD_DAYS_BY_PATTERN.get(raw_pattern, DEFAULT_MAX_HOLD_DAYS)
     trailing = pos.get("trailing_stop_active", False)
     peak = pos.get("peak_price_aud")
 
@@ -152,7 +155,7 @@ def _format_position_card(pos: dict, opp: dict | None, fx_rate: float) -> str:
     </tr>
     <tr>
       <td style='padding:3px 20px 3px 0;color:#888;'>Held</td>
-      <td>{days_held} days &nbsp;·&nbsp; {28 - (days_held if isinstance(days_held, int) else 0)} days remaining</td>
+      <td>{days_held} days &nbsp;·&nbsp; {max(0, max_hold - days_held) if isinstance(days_held, int) else "?"} of {max_hold}d remaining</td>
     </tr>
     <tr>
       <td style='padding:3px 20px 3px 0;color:#888;'>Score</td>
@@ -175,7 +178,7 @@ def _format_closed_section(recent_closed: list[dict], opps: dict) -> str:
         pnl_pct = float(p.get("pnl_pct") or 0)
         color = _pnl_color(pnl)
         reason_map = {
-            "time_exit": "28-day exit",
+            "time_exit": "Time exit",
             "stop_loss": "Stop loss −12%",
             "trailing_stop": "Trailing stop",
             "manual": "Manual close",

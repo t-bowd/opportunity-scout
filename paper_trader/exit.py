@@ -2,9 +2,13 @@
 Checks all open paper positions for exit conditions.
 Runs daily.
 
-Exit rules:
-  - Time exit: position held ≥ 28 days
+Exit rules (priority order):
+  - Trailing stop: once up TRAILING_STOP_ACTIVATE_PCT, exit if price falls back
   - Stop loss: position down ≥ 12% from entry (in AUD terms)
+  - Time exit: held past the per-pattern horizon (insider/13F edges play out over
+    months, so they get longer than fast news/thematic plays) — but a position
+    whose trailing stop is already active is exempt, so live winners aren't cut
+    by the calendar.
 """
 
 import requests
@@ -30,7 +34,21 @@ def _pnl_to_grade(pnl_pct: float) -> int:
     if pnl_pct >= -8:  return 2   # small loss
     return 1                       # stopped out / big loss
 
-MAX_HOLD_DAYS = 28
+# Per-pattern holding horizon (days). Insider buys, 13F new positions and activist
+# stakes are medium-term edges that accrue over months — give them room. News and
+# thematic plays are shorter-lived. A position whose trailing stop is active is
+# exempt from the time exit entirely (let winners run).
+MAX_HOLD_DAYS_BY_PATTERN = {
+    "insider_buy":   60,
+    "smart_money":   60,
+    "activist":      60,
+    "spin_off":      60,
+    "s1_filed":      45,
+    "pre_ipo_proxy": 45,
+    "thematic_etf":  30,
+    "etf_launch":    30,
+}
+DEFAULT_MAX_HOLD_DAYS = 45
 STOP_LOSS_PCT = -12.0
 SLIPPAGE_PCT = 0.5      # 0.5% worse than market on exit
 
@@ -122,6 +140,10 @@ def run_exits() -> None:
 
         # --- Exit evaluation (priority order) ---
         trailing_stop_price = new_peak * (1 - TRAILING_STOP_TRAIL_PCT / 100)
+        max_hold = MAX_HOLD_DAYS_BY_PATTERN.get(pos.get("pattern", ""), DEFAULT_MAX_HOLD_DAYS)
+        # Time exit applies only if the trailing stop ISN'T active — let live
+        # winners run on the trailing stop instead of cutting them by the calendar.
+        time_exit_due = days_held >= max_hold and not should_activate
 
         if should_activate and exit_price_aud < trailing_stop_price:
             exit_reason = "trailing_stop"
@@ -129,14 +151,16 @@ def run_exits() -> None:
         elif pnl_pct <= STOP_LOSS_PCT:
             exit_reason = "stop_loss"
             new_status = "closed_stop"
-        elif days_held >= MAX_HOLD_DAYS:
+        elif time_exit_due:
             exit_reason = "time_exit"
             new_status = "closed_time"
         else:
-            trail_note = (
-                f" | trailing stop active, floor ${trailing_stop_price:.2f}"
-                if should_activate else ""
-            )
+            if should_activate:
+                # past the time limit only reachable here when trailing stop is active
+                extra = " (past time limit — trailing stop running)" if days_held >= max_hold else ""
+                trail_note = f" | trailing stop active, floor ${trailing_stop_price:.2f}{extra}"
+            else:
+                trail_note = f" | {max_hold - days_held}d to {max_hold}d time limit"
             print(
                 f"[paper/exit] HOLD {ticker} — "
                 f"{days_held}d, {pnl_pct:+.1f}% (${pnl_aud:+.2f} AUD){trail_note}"

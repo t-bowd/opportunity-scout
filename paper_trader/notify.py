@@ -14,7 +14,7 @@ _TO = os.environ.get("DIGEST_EMAIL")
 _FROM = "Opportunity Scout <onboarding@resend.dev>"
 
 _EXIT_REASONS = {
-    "time_exit": "28-day time exit",
+    "time_exit": "Time exit (held to limit)",
     "stop_loss": "Stop loss",
     "trailing_stop": "Trailing stop",
     "manual": "Manual close",
