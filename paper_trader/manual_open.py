@@ -10,9 +10,12 @@ name $200 can't buy a share of, or a pick you simply want in now rather than on 
 next scheduled run. Each position is linked to the most recent scored opportunity
 for that ticker so its thesis and feedback stay consistent with automated entries.
 
-Respects the $2,000 pool: default size is the conviction-scaled amount (entry.py),
-capped by remaining budget. A TICKER:AMOUNT argument overrides the size (still
-capped by remaining budget). Won't open a ticker that's already open.
+Sizing: with no amount, uses the conviction-scaled size (entry.py) capped by
+remaining pool budget, and skips if the pool is full. A TICKER:AMOUNT argument is
+a deliberate override and MAY exceed the $2,000 pool — use it for a high-conviction
+manual add when the pool is full (e.g. NVRI:300). Going over just means automated
+entries pause until positions close and deployed drops back under the pool. Won't
+open a ticker that's already open.
 """
 import sys
 from datetime import date, timedelta
@@ -67,9 +70,6 @@ def open_positions(args: list[str]) -> None:
         if ticker in open_tickers:
             print(f"[manual_open] {ticker} already open — skipping")
             continue
-        if remaining_budget < MIN_TRADE_AUD:
-            print(f"[manual_open] ${remaining_budget:.0f} budget left — stopping")
-            break
 
         opp = get_latest_opportunity_by_ticker(ticker)
         if not opp:
@@ -96,11 +96,24 @@ def open_positions(args: list[str]) -> None:
             entry_price_aud = round(entry_price_usd / fx_rate, 4)
             brokerage, market = US_BROKERAGE_AUD, "US"
 
-        target_aud = min(override or _target_position_size(score), remaining_budget)
+        # Sizing. An explicit :AMOUNT is a deliberate override and MAY exceed the
+        # pool budget (a manual conviction add) — honour it. Without an amount, use
+        # the conviction size capped by remaining budget, and skip if the pool is
+        # effectively full (tell the user how to add over budget).
+        if override is not None:
+            target_aud = override
+            over_note = " (over pool budget)" if target_aud > remaining_budget else ""
+        else:
+            if remaining_budget < MIN_TRADE_AUD:
+                print(f"[manual_open] {ticker} — only ${remaining_budget:.0f} pool budget left; "
+                      f"pass {ticker}:AMOUNT to add over budget. skipping")
+                continue
+            target_aud = min(_target_position_size(score), remaining_budget)
+            over_note = ""
         quantity = int(target_aud / entry_price_aud)
         if quantity < 1:
             print(f"[manual_open] {ticker} needs ${entry_price_aud:.0f} for 1 share "
-                  f"but only ${target_aud:.0f} available — skipping")
+                  f"but only ${target_aud:.0f} allocated — skipping")
             continue
 
         pos = {
@@ -124,8 +137,8 @@ def open_positions(args: list[str]) -> None:
         remaining_budget -= cost_aud
         print(
             f"[manual_open] OPENED {ticker} ({market}) @ ${entry_price_aud:.2f} AUD "
-            f"× {quantity} = ${cost_aud:.2f} AUD (score {score}/20) — "
-            f"${remaining_budget:.0f} budget left"
+            f"× {quantity} = ${cost_aud:.2f} AUD (score {score}/20){over_note} — "
+            f"${remaining_budget:.0f} pool budget left"
         )
         notify_opened(ticker, market, entry_price_aud, quantity, cost_aud, score,
                       opp.get("pattern", "unknown"), opp.get("plain_english", ""))
