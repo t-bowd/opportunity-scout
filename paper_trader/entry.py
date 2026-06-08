@@ -13,6 +13,7 @@ Entry filters (all must pass):
   6.  Price fetchable from Yahoo Finance
   7.  Price has not moved >8% since scoring (avoids chasing)
   8.  Not within 7 days of scheduled earnings (avoids binary event risk)
+  8a. Not a SPAC / unit / warrant (hard block — blank-check shells aren't tradeable picks)
   8b. Not a falling knife (at/near 52-week low or deep unrecovered drawdown),
       unless it's a multi-insider conviction cluster
   8c. Sector not already at MAX_SECTOR_POSITIONS open positions (SIC major group)
@@ -157,12 +158,21 @@ def _fetch_relative_volume(ticker: str) -> float | None:
         return None
 
 
-def _is_falling_knife(ticker: str) -> bool:
+def _price_screen(ticker: str) -> tuple[bool, bool]:
     """
-    True if the stock is in a sustained downtrend: trading within
-    FALLING_KNIFE_ABOVE_LOW_PCT of its 52-week low, or in a deep drawdown that
-    hasn't recovered. Fails open (returns False) on any data issue.
+    One 1-year fetch, two verdicts: (is_falling_knife, is_spac).
+
+    - falling knife: trading within FALLING_KNIFE_ABOVE_LOW_PCT of the 52-week low
+      AND meaningfully off the high, or a deep unrecovered drawdown.
+    - spac/unit: a unit/warrant/rights ticker (suffix U/W/R on a multi-letter
+      symbol, e.g. IPVVU), or a blank-check shell trading dead flat at ~$10.
+
+    The SPAC check is also a deterministic ENTRY gate — the score-time SPAC filter
+    only stops NEW opportunities, so a SPAC scored before that filter (or sitting
+    in the pool) could still be entered. Fails open (False, False) on data issues,
+    except the ticker-suffix SPAC check which needs no data.
     """
+    is_spac = len(ticker) >= 5 and ticker[-1] in ("U", "W", "R")
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1y"
         resp = requests.get(url, headers=HEADERS, timeout=10)
@@ -170,15 +180,16 @@ def _is_falling_knife(ticker: str) -> bool:
         closes = [c for c in data["indicators"]["quote"][0].get("close", []) if c]
         price = data["meta"].get("regularMarketPrice")
         if not closes or not price:
-            return False
+            return False, is_spac
         hi, lo = max(closes), min(closes)
         from_high = (price - hi) / hi * 100
         above_low = (price - lo) / lo * 100
         near_low = above_low <= FALLING_KNIFE_ABOVE_LOW_PCT and from_high <= FALLING_KNIFE_MIN_DRAWDOWN_PCT
         deep_dd = from_high <= FALLING_KNIFE_DEEP_DD_PCT and above_low <= FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT
-        return near_low or deep_dd
+        flat_at_ten = lo > 0 and (hi - lo) / lo < 0.08 and 9.0 <= price <= 11.0
+        return (near_low or deep_dd), (is_spac or flat_at_ten)
     except Exception:
-        return False  # fail open — don't block a trade on a data hiccup
+        return False, is_spac  # fail open on the knife; keep the suffix SPAC check
 
 
 def _market_is_bearish(is_asx: bool) -> bool:
@@ -335,10 +346,18 @@ def run_entries(week_of: str | None = None) -> None:
             continue
 
         pattern = opp.get("pattern", "")
+        knife, is_spac = _price_screen(ticker)
+
+        # 8a. SPAC / unit guard — never trade blank-check shells or units/warrants.
+        # Hard block (no override): score-time filter only stops NEW opportunities,
+        # so a SPAC scored earlier (e.g. IPVVU) can still reach entry from the pool.
+        if is_spac:
+            skip("spac_or_unit")
+            continue
 
         # 8b. Falling-knife guard — don't buy into a sustained downtrend. A genuine
         # multi-insider conviction cluster overrides the block; a lone insider does not.
-        if _is_falling_knife(ticker):
+        if knife:
             buyers = count_recent_insider_buyers(ticker) if pattern == "insider_buy" else 0
             if buyers >= CLUSTER_MIN_BUYERS:
                 print(f"[paper/entry] {ticker} is a falling knife but a {buyers}-insider cluster — allowing")
