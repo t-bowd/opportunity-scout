@@ -17,6 +17,11 @@ ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 THIRTEEN_F_TOP_N = 5
 THIRTEEN_F_MIN_VALUE_USD = 5_000_000
 THIRTEEN_F_INCREASE_THRESHOLD = 0.20  # +20% shares vs prior quarter counts as "increased"
+# Only treat a 13F filer as "smart money" if it manages real size. The 13F net
+# catches any filer >$100M AUM, including small RIAs (e.g. Positano Wealth Mgmt
+# nudging a position 14846% off a tiny base) — not the institutional-conviction
+# signal we want. Floor is the fund's total reported 13F value (its long-equity AUM).
+THIRTEEN_F_MIN_FUND_AUM = 1_000_000_000
 
 EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index"
 EDGAR_BASE = "https://www.sec.gov"
@@ -378,6 +383,11 @@ def _build_13f_holding_signals(hit: dict) -> list[dict]:
 
     current = _fetch_13f_all_holdings(fund_cik, accession)
     if not current:
+        return []
+
+    # Fund-size floor — skip small RIAs whose moves aren't an institutional signal.
+    fund_aum = sum(h["value_usd"] for h in current)
+    if fund_aum < THIRTEEN_F_MIN_FUND_AUM:
         return []
 
     prior = _fetch_prior_13f_shares(fund_cik, accession)

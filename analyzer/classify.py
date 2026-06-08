@@ -64,7 +64,13 @@ def _13f_action(raw: dict, entity: str) -> str:
         return f"the fund {fund} INITIATED a brand-new position in {entity}"
     if change == "increased":
         pct = raw.get("pct_change")
-        bump = f" by ~{pct}%" if pct else ""
+        # A huge % off a small base is misleading — describe it qualitatively instead.
+        if pct and pct > 300:
+            bump = " substantially (a large add this quarter)"
+        elif pct:
+            bump = f" by ~{pct}%"
+        else:
+            bump = ""
         return f"the fund {fund} INCREASED its position in {entity}{bump}"
     return f"the fund {fund} disclosed holding a position in {entity}"
 
