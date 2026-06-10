@@ -7,7 +7,8 @@ Entry filters (all must pass):
       once liquidity stopped being a heavy score penalty; the market-cap floor
       that guards quality now lives at score time in analyzer/score.py.
   2.  Underlying signal filed within tiered recency window for the pattern
-  3.  Fewer than MAX_POSITIONS open positions
+  3.  Fewer than MAX_POSITIONS open positions (hard ceiling). The $2k pool is a
+      SOFT cap — once full, only score >= HIGH_CONVICTION_SCORE picks may go over it
   4.  No duplicate ticker already open
   5.  Not already entered for this exact opportunity
   6.  Price fetchable from Yahoo Finance
@@ -65,14 +66,19 @@ BEARISH_MIN_SCORE = 15          # higher bar when broad market is in drawdown
 MARKET_REGIME_THRESHOLD = 0.90  # >10% below 52w high = bearish
 MAX_POSITIONS = 10              # secondary cap; the $2,000 pool is the real limit
 
-# Conviction-scaled position sizing. Total paper capital is a $2,000 pool; the
-# default trade is ~$200, but stronger-conviction picks get a larger slice as
-# long as budget remains. Highest-scoring opportunities are processed first
-# (get_recent_opportunities orders by score desc), so they get capital priority.
+# Conviction-scaled position sizing. The $2,000 pool is a SOFT cap (a test budget,
+# not a hard risk limit): the default trade is ~$200, stronger picks get more, and
+# while budget remains everything is capped by it. Once the pool is full, only
+# high-conviction picks (score >= HIGH_CONVICTION_SCORE) may go OVER it — so the
+# pool throttles marginal picks but never blocks a standout. MAX_POSITIONS is the
+# real hard ceiling. Highest-scoring opportunities are processed first (capital
+# priority). (For real money this soft/hard split should become an explicit dollar
+# risk limit, not just a position count.)
 TOTAL_POOL_AUD = 2000.0
 BASE_POSITION_AUD = 200.0
 MIN_TRADE_AUD = 150.0           # don't open a position smaller than this
 SIZE_TIERS = [(18, 400.0), (16, 300.0)]  # score >= threshold -> target size; else BASE
+HIGH_CONVICTION_SCORE = 18      # picks at/above this may enter over the soft pool
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
 SLIPPAGE_PCT = 0.5
@@ -269,8 +275,10 @@ def run_entries(week_of: str | None = None) -> None:
         print(f"[paper/entry] {open_count} positions open — no slots, skipping")
         return
     if remaining_budget < MIN_TRADE_AUD:
-        print(f"[paper/entry] ${remaining_budget:.0f} budget left of ${TOTAL_POOL_AUD:.0f} — pool full, skipping")
-        return
+        # Soft pool is full — don't stop. High-conviction picks (score >=
+        # HIGH_CONVICTION_SCORE) may still enter over the pool; marginal ones skip.
+        print(f"[paper/entry] soft pool full (${remaining_budget:.0f} of ${TOTAL_POOL_AUD:.0f} left) "
+              f"— only score >={HIGH_CONVICTION_SCORE} picks may go over")
 
     fx_rate = _fetch_fx_rate()
 
@@ -396,11 +404,19 @@ def run_entries(week_of: str | None = None) -> None:
             brokerage = US_BROKERAGE_AUD
             market = "US"
 
-        # 10. Position sizing — conviction-scaled, capped by remaining budget
-        target_aud = min(_target_position_size(score), remaining_budget)
-        if target_aud < MIN_TRADE_AUD:
-            skip("budget_exhausted")
-            break
+        # 10. Position sizing — conviction-scaled. Within the soft pool, cap by
+        # remaining budget. Once the pool is full, only high-conviction picks
+        # (score >= HIGH_CONVICTION_SCORE) may enter, sized at full conviction and
+        # deliberately over the pool; marginal picks skip. MAX_POSITIONS (checked
+        # above) is the hard ceiling either way.
+        conviction_size = _target_position_size(score)
+        if remaining_budget >= MIN_TRADE_AUD:
+            target_aud = min(conviction_size, remaining_budget)
+        elif score >= HIGH_CONVICTION_SCORE:
+            target_aud = conviction_size  # high conviction — go over the soft pool
+        else:
+            skip("soft_pool_full")
+            continue
         quantity = int(target_aud / entry_price_aud)
         if quantity < 1:
             skip(f"price_too_high_aud:{entry_price_aud:.2f}")
@@ -433,10 +449,14 @@ def run_entries(week_of: str | None = None) -> None:
         entered += 1
 
         regime_note = " [bearish regime]" if bearish else ""
+        budget_note = (
+            f"${remaining_budget:.0f} budget left" if remaining_budget >= 0
+            else f"${-remaining_budget:.0f} over soft pool [high-conviction]"
+        )
         print(
             f"[paper/entry] ENTER {ticker} ({market}) @ "
             f"${entry_price_aud:.2f} AUD × {quantity} = ${cost_aud:.2f} AUD "
-            f"(score {score}/20{regime_note}) — ${remaining_budget:.0f} budget left"
+            f"(score {score}/20{regime_note}) — {budget_note}"
         )
         notify_opened(ticker, market, entry_price_aud, quantity, cost_aud, score,
                       opp.get("pattern", "unknown"), opp.get("plain_english", ""))
