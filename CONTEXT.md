@@ -156,7 +156,7 @@ the calendar week — so a Friday pick is still actionable Monday; per-pattern r
 
 | Workflow | Schedule | Purpose |
 |---|---|---|
-| `daily.yml` | 06:00 AEST, **7 days/week** | collect → classify → score → paper trade |
+| `daily.yml` | **16:00 UTC** (mid US session), 7 days/week | collect → classify → score → paper trade |
 | `weekly-digest.yml` | Sunday 6pm AEST | portfolio digest |
 | `edgar-watch.yml` | hourly | early collect+classify (no alerts) |
 | `manual-open.yml` / `manual-close.yml` | manual dispatch | open/close named tickers |
@@ -175,8 +175,11 @@ dispatch is the reliable fallback.
   high/low, volume. **`quoteSummary` and `v7/quote` are auth-walled (401/429)** → do NOT
   rely on them. Consequences: market cap isn't available (use **avg $ volume** as the
   tradeability proxy); sector comes from **SEC SIC codes**, not Yahoo.
-- The daily cron runs around US market close, so the latest daily volume bar is often
-  0/incomplete — volume helpers drop zero bars.
+- The daily cron runs **mid US session** (16:00 UTC) so paper entries/exits fill at a
+  live, tradeable price — the paper P&L reflects fills we could actually get, not the
+  close. Consequence: today's daily volume bar is partial, so the relative-volume helper
+  uses the last fully-closed session (volumes[-2]). (US and ASX market hours don't
+  overlap, so ASX fills still have an open-gap — acceptable, ASX is a minority of picks.)
 - **Cost is negligible** (~cents/day after the dedup/cap); credits depleting is a
   zero-balance prepay gate, not high spend. A $10 top-up lasts ~a year.
 

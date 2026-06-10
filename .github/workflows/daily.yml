@@ -2,8 +2,12 @@ name: Daily Collection
 
 on:
   schedule:
-    # 06:00 AEST = 20:00 UTC — runs 7 days/week to catch weekend news + paper exits
-    - cron: "0 20 * * *"
+    # 16:00 UTC = mid US session (noon ET in summer / 11am ET in winter), always
+    # comfortably inside 09:30–16:00 ET even with GitHub Actions' cron lag. Running
+    # mid-session means paper entries/exits fill at a live, tradeable price rather
+    # than at/after the close — so the paper P&L reflects fills we could actually
+    # get. 7 days/week (weekend runs still process news + paper exits).
+    - cron: "0 16 * * *"
   workflow_dispatch:  # allow manual trigger
 
 jobs:

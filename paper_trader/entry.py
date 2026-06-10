@@ -140,20 +140,21 @@ def _fetch_price_and_earnings(ticker: str) -> tuple[float | None, int | None]:
 
 def _fetch_relative_volume(ticker: str) -> float | None:
     """
-    Most recent complete session's volume / trailing average. Returns None if
-    unavailable. Drops zero-volume bars — the daily cron runs around US market
-    close, so the latest bar is often empty/incomplete and would otherwise read
-    as 0.00x and spuriously fail the filter.
+    Last fully-closed session's volume / trailing average. Returns None if
+    unavailable. The daily cron runs mid US session, so today's bar is partial —
+    we compare the last COMPLETE session (volumes[-2]) against the trailing
+    average, rather than the in-progress bar which would understate volume.
     """
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1mo"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         volumes = resp.json()["chart"]["result"][0]["indicators"]["quote"][0].get("volume", [])
-        volumes = [v for v in volumes if v]  # drop None and 0 (incomplete bars)
-        if len(volumes) < 5:
+        volumes = [v for v in volumes if v]  # drop None and 0 bars
+        if len(volumes) < 6:
             return None
-        avg = sum(volumes[:-1]) / len(volumes[:-1])
-        return volumes[-1] / avg if avg > 0 else None
+        recent = volumes[-2]                       # last fully-closed session
+        baseline = sum(volumes[:-2]) / len(volumes[:-2])
+        return recent / baseline if baseline > 0 else None
     except Exception:
         return None
 
