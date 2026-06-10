@@ -8,7 +8,10 @@ import re
 from datetime import date, timedelta
 from google import genai
 from google.genai import types
-from db.client import get_client, insert_opportunity, opportunity_exists
+from db.client import (
+    get_client, insert_opportunity,
+    get_opportunity_by_vehicle_week, update_opportunity,
+)
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = "gemini-2.5-flash"
@@ -335,6 +338,7 @@ def score_week(week_of: str | None = None) -> list[str]:
 
     inserted_ids = []
     already_scored = 0
+    rescored = 0
     no_price = 0
     too_small = 0
     spac_skipped = 0
@@ -344,9 +348,15 @@ def score_week(week_of: str | None = None) -> list[str]:
         if not ticker:
             continue
 
-        # Skip if already scored this ticker this week (daily re-runs create duplicates)
-        if opportunity_exists(ticker, week_of):
-            print(f"[score] {ticker} already scored for week {week_of}, skipping")
+        # Re-score handling: keep one opportunity per ticker per week, but if a
+        # later run scores it HIGHER (e.g. an insider cluster grew), update the
+        # stored row rather than discarding the stronger read.
+        new_total = (opp.get("conviction", 0) + opp.get("asymmetry", 0)
+                     + opp.get("liquidity", 0) + opp.get("timing", 0))
+        existing = get_opportunity_by_vehicle_week(ticker, week_of)
+        if existing and new_total <= (existing.get("total_score") or 0):
+            print(f"[score] {ticker} already scored {existing['total_score']}/20 "
+                  f"(>= new {new_total}), keeping")
             already_scored += 1
             continue
 
@@ -413,13 +423,22 @@ def score_week(week_of: str | None = None) -> list[str]:
             "plain_english": opp.get("plain_english", ""),
             "signal_type_explainer": opp.get("signal_type_explainer", ""),
         }
-        opp_id = insert_opportunity(row)
-        inserted_ids.append(opp_id)
-        total = row["conviction"] + row["asymmetry"] + row["liquidity"] + row["timing"]
-        print(f"[score] {row['title']} [{pattern}] — score {total}/20")
+        if existing:
+            # Stronger re-score — refresh the stored row, including created_at so
+            # the recency window resets (a cluster that grew today is fresh signal).
+            from datetime import datetime, timezone
+            row["created_at"] = datetime.now(timezone.utc).isoformat()
+            update_opportunity(existing["id"], row)
+            rescored += 1
+            print(f"[score] {row['title']} [{pattern}] — RE-SCORED "
+                  f"{existing['total_score']}→{new_total}/20")
+        else:
+            opp_id = insert_opportunity(row)
+            inserted_ids.append(opp_id)
+            print(f"[score] {row['title']} [{pattern}] — score {new_total}/20")
 
     print(
-        f"[score] done — {len(inserted_ids)} inserted, "
+        f"[score] done — {len(inserted_ids)} inserted, {rescored} re-scored higher, "
         f"{already_scored} already scored this week, "
         f"{no_price} skipped (no price), {too_small} skipped (too small), "
         f"{spac_skipped} skipped (SPAC/unit)"

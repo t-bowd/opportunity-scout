@@ -110,6 +110,26 @@ def opportunity_exists(vehicle: str, week_of: str) -> bool:
     return len(result.data) > 0
 
 
+def get_opportunity_by_vehicle_week(vehicle: str, week_of: str) -> dict | None:
+    """The existing opportunity (id + total_score) for a ticker this week, or None.
+    Lets the scorer decide whether a re-score is higher and worth updating."""
+    db = get_client()
+    result = (
+        db.table("opportunities")
+        .select("id, total_score")
+        .eq("vehicle", vehicle)
+        .eq("week_of", week_of)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def update_opportunity(opportunity_id: str, fields: dict) -> None:
+    db = get_client()
+    db.table("opportunities").update(fields).eq("id", opportunity_id).execute()
+
+
 def insert_opportunity(opp: dict) -> str:
     db = get_client()
     result = db.table("opportunities").insert(opp).execute()
