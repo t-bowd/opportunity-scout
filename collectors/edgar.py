@@ -30,6 +30,10 @@ THIRTEEN_F_MIN_FUND_AUM = 1_000_000_000
 # days before the filing date.
 FORM4_MAX_FILING_LAG_DAYS = 7
 
+# Max pages (100 hits each) to walk per form per run. A few days of even the
+# busiest form (Form 4) sits well under this; the cap just prevents a runaway loop.
+EDGAR_MAX_PAGES = 30
+
 EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index"
 EDGAR_BASE = "https://www.sec.gov"
 HEADERS = {
@@ -104,25 +108,37 @@ def get_sector_key(ticker: str) -> str | None:
 
 
 def _edgar_search(form_type: str, start_date: str, end_date: str) -> list[dict]:
-    params = {
-        "forms": form_type,
-        "dateRange": "custom",
-        "startdt": start_date,
-        "enddt": end_date,
-        "from": 0,
-        "size": 40,
-    }
+    # efts returns at most 100 hits per request (sorted newest-first) and supports
+    # paging via `from`. Form 4 is high-volume — hundreds of filings a day — so a
+    # single page silently drops everything below the newest 100, which both misses
+    # filings and picks others up late (an older one only surfaces once filing
+    # volume drops enough for it to climb into the top 100). Page through until a
+    # short page signals we've exhausted the window. EDGAR_MAX_PAGES caps the walk
+    # so a pathological window can't loop forever (efts also hard-limits from<10000).
+    #
     # No text filter on Form 4 — "Open Market Purchase" as a full-text query was
     # too restrictive because many Form 4 filings use only the transaction code "P"
     # with no human-readable description, causing the collector to find almost nothing.
-    # Filtering for discretionary buys is handled at the scoring stage: the rule-based
-    # summary explicitly states "transaction code P" and the scoring prompt instructs
-    # Gemini to score discretionary buys higher than ESPP/plan purchases.
-
-    resp = requests.get(EDGAR_SEARCH, params=params, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    hits = resp.json().get("hits", {}).get("hits", [])
-    return hits
+    # Filtering for discretionary buys is handled at the scoring stage.
+    page_size = 100
+    all_hits: list[dict] = []
+    for page in range(EDGAR_MAX_PAGES):
+        params = {
+            "forms": form_type,
+            "dateRange": "custom",
+            "startdt": start_date,
+            "enddt": end_date,
+            "from": page * page_size,
+            "size": page_size,
+        }
+        resp = requests.get(EDGAR_SEARCH, params=params, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        hits = resp.json().get("hits", {}).get("hits", [])
+        all_hits.extend(hits)
+        if len(hits) < page_size:
+            break  # last (partial) page — window exhausted
+        time.sleep(0.3)  # between pages — stay under SEC rate limit
+    return all_hits
 
 
 def _extract_entity_name(src: dict, form_type: str) -> str:
@@ -458,6 +474,28 @@ def _build_13f_holding_signals(hit: dict) -> list[dict]:
     return signals
 
 
+def _log_form4_latency(signal: dict) -> None:
+    """One line per newly detected Form 4 so we can watch our detection lag.
+    filing lag = transaction → filing (the insider's legal 2-business-day window,
+    not our fault); detection lag = filing → today (how late WE were to ingest a
+    public filing — the number that tells us if pagination/cadence needs work)."""
+    rd = signal.get("raw_data", {})
+    txn = rd.get("transaction_date")
+    filed = signal.get("signal_date")
+    tkr = rd.get("ticker") or rd.get("entity_name", "?")
+    parts = []
+    try:
+        if txn and filed:
+            parts.append(f"filing lag {(date.fromisoformat(filed) - date.fromisoformat(txn)).days}d")
+        if filed:
+            parts.append(f"detection lag {(date.today() - date.fromisoformat(filed)).days}d")
+    except (ValueError, TypeError):
+        pass
+    when = f"purchased {txn}, " if txn else ""
+    suffix = f" ({', '.join(parts)})" if parts else ""
+    print(f"[edgar]   {tkr}: {when}filed {filed}{suffix}")
+
+
 def collect(lookback_days: int = 3) -> int:
     end = date.today()
     start = end - timedelta(days=lookback_days)
@@ -485,6 +523,8 @@ def collect(lookback_days: int = 3) -> int:
                     if insert_signal(signal):
                         inserted += 1
                         form_inserted += 1
+                        if form_type == "4":
+                            _log_form4_latency(signal)
             print(f"[edgar] {form_type} ({pattern}): {form_inserted} new / {len(hits)} found")
             time.sleep(0.5)  # stay well under SEC rate limit
         except Exception as e:
