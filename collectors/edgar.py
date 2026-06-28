@@ -23,6 +23,13 @@ THIRTEEN_F_INCREASE_THRESHOLD = 0.20  # +20% shares vs prior quarter counts as "
 # signal we want. Floor is the fund's total reported 13F value (its long-equity AUM).
 THIRTEEN_F_MIN_FUND_AUM = 1_000_000_000
 
+# A Form 4 must be filed within 2 business days of the trade, so a few calendar
+# days of lag (especially across a weekend) is normal. But a genuinely late or
+# amended filing for a much older purchase has no edge left — the market has long
+# since priced it. Skip any Form 4 whose purchase is more than this many calendar
+# days before the filing date.
+FORM4_MAX_FILING_LAG_DAYS = 7
+
 EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index"
 EDGAR_BASE = "https://www.sec.gov"
 HEADERS = {
@@ -208,6 +215,7 @@ def _fetch_form4_purchase(hit: dict) -> dict | None:
     # Sum shares across non-derivative code-P transactions only
     total_shares = 0.0
     price = None
+    txn_date = None  # most recent purchase date across the code-P blocks
     for block in re.findall(
         r"<nonDerivativeTransaction>.*?</nonDerivativeTransaction>", txt, re.DOTALL
     ):
@@ -216,10 +224,13 @@ def _fetch_form4_purchase(hit: dict) -> dict | None:
             continue
         sh = re.search(r"<transactionShares>\s*<value>([\d.]+)", block)
         pr = re.search(r"<transactionPricePerShare>\s*<value>([\d.]+)", block)
+        dt = re.search(r"<transactionDate>\s*<value>([\d-]+)", block)
         if sh:
             total_shares += float(sh.group(1))
         if pr and price is None:
             price = float(pr.group(1))
+        if dt and (txn_date is None or dt.group(1) > txn_date):
+            txn_date = dt.group(1)
 
     if total_shares <= 0:
         return None  # no open-market purchase in this filing
@@ -243,6 +254,7 @@ def _fetch_form4_purchase(hit: dict) -> dict | None:
         "shares": int(total_shares),
         "price": round(price, 2) if price else None,
         "value_usd": int(total_shares * price) if price else None,
+        "transaction_date": txn_date,
     }
 
 
@@ -255,6 +267,16 @@ def _build_form4_signal(hit: dict) -> list[dict]:
     purchase = _fetch_form4_purchase(hit)
     if not purchase:
         return []  # grant / sale / exercise — not a bullish buy signal
+    # Skip stale/late filings: if the purchase happened well before it was filed,
+    # the market has already priced it and the signal has no edge left.
+    txn_date = purchase.get("transaction_date")
+    if txn_date:
+        try:
+            lag = (date.fromisoformat(base["signal_date"]) - date.fromisoformat(txn_date)).days
+            if lag > FORM4_MAX_FILING_LAG_DAYS:
+                return []
+        except (ValueError, TypeError):
+            pass  # unparseable date — don't drop the signal on that alone
     base["raw_data"].update(purchase)
     return [base]
 

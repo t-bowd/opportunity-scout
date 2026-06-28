@@ -109,8 +109,13 @@ def _rule_based_summary(signal: dict) -> str:
             f4 += f" at ~${price}/share"
         if value:
             f4 += f" (~${int(value):,} total)"
+        txn_date = raw.get("transaction_date")
+        when = (
+            f"purchased {txn_date}, filed {filing_date}"
+            if txn_date else f"filed on {filing_date}"
+        )
         return (
-            f"SEC Form 4 open-market purchase (transaction code P) filed on {filing_date}. "
+            f"SEC Form 4 open-market purchase (transaction code P) {when}. "
             f"{f4}. The insider bought shares with their own money — a discretionary, "
             f"bullish signal, not a grant, ESPP, or option exercise. {ticker_clause}"
         )
