@@ -3,12 +3,21 @@ Checks all open paper positions for exit conditions.
 Runs daily.
 
 Exit rules (priority order):
-  - Trailing stop: once up TRAILING_STOP_ACTIVATE_PCT, exit if price falls back
+  - Trailing stop: once the position has gained TRAILING_STOP_ACTIVATE_PCT the
+    stop ARMS (latched — it stays armed), then trails TRAILING_STOP_TRAIL_PCT
+    below the running peak; exit when price touches that floor.
   - Stop loss: position down ≥ 12% from entry (in AUD terms)
   - Time exit: held past the per-pattern horizon (insider/13F edges play out over
     months, so they get longer than fast news/thematic plays) — but a position
-    whose trailing stop is already active is exempt, so live winners aren't cut
+    whose trailing stop is already armed is exempt, so live winners aren't cut
     by the calendar.
+
+Live-trading note: the trail here is evaluated once per daily run (a price poll).
+When wiring a real broker, do NOT keep this as a poll — submit a broker-native
+trailing-stop order (trail_percent = TRAILING_STOP_TRAIL_PCT) once the position
+crosses +TRAILING_STOP_ACTIVATE_PCT, so the broker tracks the intraday peak and
+fills at the floor intraday. The parameters carry over unchanged; only the
+execution moves from a daily poll to a resting exchange order.
 """
 
 import requests
@@ -22,8 +31,8 @@ from db.client import (
 )
 from paper_trader.notify import notify_closed
 
-TRAILING_STOP_ACTIVATE_PCT = 30.0   # activate trailing stop once up 30%
-TRAILING_STOP_TRAIL_PCT    = 15.0   # exit if price falls 15% below peak
+TRAILING_STOP_ACTIVATE_PCT = 20.0   # arm the trailing stop once the position has gained 20%
+TRAILING_STOP_TRAIL_PCT    = 10.0   # then exit if price falls 10% below the running peak
 
 
 def _pnl_to_grade(pnl_pct: float) -> int:
@@ -122,30 +131,36 @@ def run_exits() -> None:
         )
 
         # --- Trailing stop maintenance ---
-        # Update peak price and activate trailing stop if threshold reached
+        # Track the running peak and arm the trailing stop once the position has
+        # gained TRAILING_STOP_ACTIVATE_PCT. Activation LATCHES: once armed it stays
+        # armed (we read the stored flag, not today's P&L), so a winner that ticks
+        # back under the activation line keeps its trailing protection instead of
+        # silently disarming. The peak only ever ratchets up. This mirrors a
+        # broker-native trailing-stop order — see the live-trading note up top.
         current_peak = float(pos.get("peak_price_aud") or entry_price_aud)
-        trailing_active = bool(pos.get("trailing_stop_active", False))
+        was_active = bool(pos.get("trailing_stop_active", False))
 
         new_peak = max(current_peak, exit_price_aud)
-        should_activate = pnl_pct >= TRAILING_STOP_ACTIVATE_PCT
+        peak_gain_pct = (new_peak - entry_price_aud) / entry_price_aud * 100
+        trailing_active = was_active or peak_gain_pct >= TRAILING_STOP_ACTIVATE_PCT
 
-        if new_peak != current_peak or should_activate != trailing_active:
-            update_paper_position_peak(pos["id"], new_peak, should_activate)
-            if should_activate and not trailing_active:
+        if new_peak != current_peak or trailing_active != was_active:
+            update_paper_position_peak(pos["id"], new_peak, trailing_active)
+            if trailing_active and not was_active:
                 print(
-                    f"[paper/exit] TRAILING STOP ACTIVATED {ticker} — "
-                    f"up {pnl_pct:+.1f}%, peak ${new_peak:.2f} AUD, "
+                    f"[paper/exit] TRAILING STOP ARMED {ticker} — "
+                    f"peak +{peak_gain_pct:.1f}%, peak ${new_peak:.2f} AUD, "
                     f"stop at ${new_peak * (1 - TRAILING_STOP_TRAIL_PCT / 100):.2f} AUD"
                 )
 
         # --- Exit evaluation (priority order) ---
         trailing_stop_price = new_peak * (1 - TRAILING_STOP_TRAIL_PCT / 100)
         max_hold = MAX_HOLD_DAYS_BY_PATTERN.get(pos.get("pattern", ""), DEFAULT_MAX_HOLD_DAYS)
-        # Time exit applies only if the trailing stop ISN'T active — let live
+        # Time exit applies only if the trailing stop ISN'T armed — let live
         # winners run on the trailing stop instead of cutting them by the calendar.
-        time_exit_due = days_held >= max_hold and not should_activate
+        time_exit_due = days_held >= max_hold and not trailing_active
 
-        if should_activate and exit_price_aud < trailing_stop_price:
+        if trailing_active and exit_price_aud < trailing_stop_price:
             exit_reason = "trailing_stop"
             new_status = "closed_trail"
         elif pnl_pct <= STOP_LOSS_PCT:
@@ -155,10 +170,10 @@ def run_exits() -> None:
             exit_reason = "time_exit"
             new_status = "closed_time"
         else:
-            if should_activate:
-                # past the time limit only reachable here when trailing stop is active
+            if trailing_active:
+                # past the time limit only reachable here when trailing stop is armed
                 extra = " (past time limit — trailing stop running)" if days_held >= max_hold else ""
-                trail_note = f" | trailing stop active, floor ${trailing_stop_price:.2f}{extra}"
+                trail_note = f" | trailing stop armed, floor ${trailing_stop_price:.2f}{extra}"
             else:
                 trail_note = f" | {max_hold - days_held}d to {max_hold}d time limit"
             print(

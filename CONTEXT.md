@@ -117,7 +117,12 @@ the calendar week — so a Friday pick is still actionable Monday; per-pattern r
   `MIN_TRADE_AUD=150`. US ≈ $1 brokerage, ASX $0; 0.5% slippage. FX from Yahoo (USD per AUD, fallback 0.65).
 
 ### Exit logic (paper_trader/exit.py), priority order
-1. **Trailing stop** — activates at **+30%**, exits if price falls **15%** below peak
+1. **Trailing stop** — **arms at +20%** (latched — stays armed once hit), then exits if
+   price falls **10%** below the running peak. (Was +30%/15%; tightened to bank more of a
+   winner and recycle capital faster. Latched activation fixes a bug where the trail
+   silently disarmed whenever P&L dipped back under the activation line.) The paper logic
+   evaluates this on the daily poll; live trading should use a broker-native trailing-stop
+   order — same params, intraday execution.
 2. **Stop loss** — **−12%**
 3. **Time exit** — per-pattern: insider/smart_money/activist/spin_off **60d**, s1/pre_ipo
    **45d**, thematic/etf **30d**, default 45d. **Exempt if the trailing stop is active**
