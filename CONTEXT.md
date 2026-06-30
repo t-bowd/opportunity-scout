@@ -224,8 +224,11 @@ run_daily.py · run_weekly.py · run_edgar_watch.py · run_smoke.py
 
 - **Commit after every change; never push** — the user pushes. End commit messages with the
   Co-Authored-By trailer.
-- **Run `python run_smoke.py` before saying "ready to push"** — stubs deps locally; catches
-  import/crash regressions (deps aren't installed in the dev shell, so it's run with stubs).
+- **Run `.venv/bin/python run_smoke.py` before saying "ready to push"** — catches
+  import/crash regressions in the pure helpers. Needs Python **3.12** (the code uses
+  `X | None` annotations that fail on 3.9) and the deps installed: a repo-local `.venv`
+  (gitignored) built with `uv venv .venv --python 3.12 && uv pip install -p .venv/bin/python
+  -r requirements.txt`. The system `python3` is 3.9 and will fail — use the venv.
 - Don't read `.env*` / secrets.
 - After sharing each daily run, the user expects new picks **chart-checked** (52w position,
   YTD, $ volume) to catch falling knives / SPACs / junk before trusting them.
