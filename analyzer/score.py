@@ -10,7 +10,7 @@ from google import genai
 from google.genai import types
 from db.client import (
     get_client, insert_opportunity,
-    get_opportunity_by_vehicle_week, update_opportunity,
+    get_recent_opportunity_by_ticker, update_opportunity,
 )
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -22,11 +22,23 @@ PATTERNS_TO_SCORE = {
 }
 
 # Cap how many signals go into one scoring prompt. Sending every processed signal
-# for the week (420+ during the pre-fix backlog) burned Gemini credits and fired a
-# Yahoo price fetch per signal. We dedupe by company (keep the most recent) and
-# take the freshest MAX_SIGNALS_TO_SCORE — recent signals are what we can still act
-# on anyway, and the stale backlog ages out of the week window naturally.
+# (420+ during the pre-fix backlog) burned Gemini credits and fired a Yahoo price
+# fetch per signal. We dedupe by company (keep the most recent) and take the
+# freshest MAX_SIGNALS_TO_SCORE — recent signals are what we can still act on anyway.
 MAX_SIGNALS_TO_SCORE = 60
+
+# Score signals from a rolling window by filing date rather than the strict
+# calendar week. A strict Mon–Sun window silently dropped any signal detected
+# after its week rolled over — e.g. pagination recovering a Friday cluster on
+# Monday — because the scorer always moved forward with the new week. The window
+# is a couple of days wider than the EDGAR lookback (3d) so late-detected backlog
+# still gets a scoring pass; entry.py's per-pattern recency then gates actionability.
+SCORE_LOOKBACK_DAYS = 8
+
+# When de-duping a pick against an already-scored opportunity, look back this far
+# (by created_at) rather than keying on the calendar week — so a ticker scored
+# late last week updates its existing row instead of spawning a duplicate.
+RESCORE_LOOKBACK_DAYS = 14
 
 SCORING_PROMPT = """You are scoring stock market opportunities for a retail investor based in Australia.
 
@@ -96,15 +108,13 @@ def _extract_json(text: str) -> str:
     return text
 
 
-def _fetch_week_signals(week_of: str) -> list[dict]:
+def _fetch_recent_signals(cutoff: str) -> list[dict]:
     db = get_client()
-    week_end = (date.fromisoformat(week_of) + timedelta(days=6)).isoformat()
     result = (
         db.table("signals")
         .select("*")
         .eq("processed", True)
-        .gte("signal_date", week_of)
-        .lte("signal_date", week_end)
+        .gte("signal_date", cutoff)
         .in_("pattern", list(PATTERNS_TO_SCORE))
         .neq("pattern", "irrelevant")
         .execute()
@@ -116,7 +126,7 @@ def _prioritize_signals(signals: list[dict], cap: int) -> list[dict]:
     """
     Dedupe signals by company (keeping the most recent per company) and return the
     freshest `cap`. Annotates each kept signal with `_dup_count` = how many signals
-    referenced that company this week, so insider clusters can be surfaced to Gemini.
+    referenced that company in the window, so insider clusters can be surfaced to Gemini.
     """
     signals = sorted(signals, key=lambda s: s.get("signal_date", ""), reverse=True)
     by_key: dict[str, dict] = {}
@@ -131,21 +141,19 @@ def _prioritize_signals(signals: list[dict], cap: int) -> list[dict]:
     return [by_key[k] for k in order[:cap]]
 
 
-def _log_week_signal_breakdown(week_of: str) -> None:
-    """Print a full breakdown of processed signals for the week — diagnostic only."""
+def _log_signal_breakdown(cutoff: str) -> None:
+    """Print a full breakdown of recently-filed processed signals — diagnostic only."""
     db = get_client()
-    week_end = (date.fromisoformat(week_of) + timedelta(days=6)).isoformat()
     all_processed = (
         db.table("signals")
         .select("pattern, source")
         .eq("processed", True)
-        .gte("signal_date", week_of)
-        .lte("signal_date", week_end)
+        .gte("signal_date", cutoff)
         .execute()
         .data
     )
     if not all_processed:
-        print(f"[score] no processed signals found for week {week_of} — collection may not have run yet")
+        print(f"[score] no processed signals filed since {cutoff} — collection may not have run yet")
         return
 
     from collections import Counter
@@ -153,7 +161,7 @@ def _log_week_signal_breakdown(week_of: str) -> None:
     scoreable = {p: c for p, c in by_pattern.items() if p in PATTERNS_TO_SCORE}
     skipped = {p: c for p, c in by_pattern.items() if p not in PATTERNS_TO_SCORE}
 
-    print(f"[score] week {week_of} — {len(all_processed)} processed signals total")
+    print(f"[score] signals filed since {cutoff} — {len(all_processed)} processed total")
     if scoreable:
         print(f"[score]   scoreable: " + ", ".join(f"{p}×{c}" for p, c in sorted(scoreable.items())))
     if skipped:
@@ -216,15 +224,18 @@ def _get_price(ticker: str) -> float | None:
 
 
 def score_week(week_of: str | None = None) -> list[str]:
+    today = date.today()
+    # week_of is kept only as a label on the stored opportunity (used by the
+    # weekly digest); signal selection is now a rolling window, not this week.
     if week_of is None:
-        today = date.today()
         week_of = (today - timedelta(days=today.weekday())).isoformat()
+    cutoff = (today - timedelta(days=SCORE_LOOKBACK_DAYS)).isoformat()
 
-    _log_week_signal_breakdown(week_of)
+    _log_signal_breakdown(cutoff)
 
-    signals = _fetch_week_signals(week_of)
+    signals = _fetch_recent_signals(cutoff)
     if not signals:
-        print(f"[score] no scoreable signals for week {week_of} — all classified as irrelevant/non-scoreable patterns")
+        print(f"[score] no scoreable signals filed since {cutoff} — all classified as irrelevant/non-scoreable patterns")
         return []
     total_found = len(signals)
     signals = _prioritize_signals(signals, MAX_SIGNALS_TO_SCORE)
@@ -240,7 +251,7 @@ def score_week(week_of: str | None = None) -> list[str]:
         # week is a materially stronger conviction signal than a lone purchase.
         dup = s.get("_dup_count", 1)
         if s.get("pattern") == "insider_buy" and dup > 1:
-            base += f"\n  CLUSTER: {dup} separate insider purchase filings for this company this week — stronger conviction."
+            base += f"\n  CLUSTER: {dup} separate insider purchase filings for this company recently — stronger conviction."
         # Try to get a ticker hint from raw_data for price context
         raw = s.get("raw_data", {})
         ticker_hint = raw.get("vehicle") or raw.get("ticker")
@@ -348,12 +359,12 @@ def score_week(week_of: str | None = None) -> list[str]:
         if not ticker:
             continue
 
-        # Re-score handling: keep one opportunity per ticker per week, but if a
-        # later run scores it HIGHER (e.g. an insider cluster grew), update the
-        # stored row rather than discarding the stronger read.
+        # Re-score handling: keep one opportunity per ticker within the recent
+        # window, but if a later run scores it HIGHER (e.g. an insider cluster
+        # grew), update the stored row rather than discarding the stronger read.
         new_total = (opp.get("conviction", 0) + opp.get("asymmetry", 0)
                      + opp.get("liquidity", 0) + opp.get("timing", 0))
-        existing = get_opportunity_by_vehicle_week(ticker, week_of)
+        existing = get_recent_opportunity_by_ticker(ticker, RESCORE_LOOKBACK_DAYS)
         if existing and new_total <= (existing.get("total_score") or 0):
             print(f"[score] {ticker} already scored {existing['total_score']}/20 "
                   f"(>= new {new_total}), keeping")
@@ -439,7 +450,7 @@ def score_week(week_of: str | None = None) -> list[str]:
 
     print(
         f"[score] done — {len(inserted_ids)} inserted, {rescored} re-scored higher, "
-        f"{already_scored} already scored this week, "
+        f"{already_scored} already scored recently, "
         f"{no_price} skipped (no price), {too_small} skipped (too small), "
         f"{spac_skipped} skipped (SPAC/unit)"
     )

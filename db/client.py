@@ -125,6 +125,26 @@ def get_opportunity_by_vehicle_week(vehicle: str, week_of: str) -> dict | None:
     return result.data[0] if result.data else None
 
 
+def get_recent_opportunity_by_ticker(vehicle: str, days: int = 14) -> dict | None:
+    """Most recent opportunity (id + total_score) for a ticker scored within the
+    last `days` (by created_at), or None. Replaces week-keyed dedup in the scorer:
+    a signal detected after its calendar week rolls over still de-dupes against its
+    recent scoring instead of spawning a duplicate opportunity row."""
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    db = get_client()
+    result = (
+        db.table("opportunities")
+        .select("id, total_score")
+        .eq("vehicle", vehicle)
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
 def update_opportunity(opportunity_id: str, fields: dict) -> None:
     db = get_client()
     db.table("opportunities").update(fields).eq("id", opportunity_id).execute()
