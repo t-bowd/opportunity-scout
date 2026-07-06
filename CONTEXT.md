@@ -173,6 +173,7 @@ the calendar week — so a Friday pick is still actionable Monday; per-pattern r
 | `edgar-watch.yml` | hourly | early collect+classify (no alerts) |
 | `manual-open.yml` / `manual-close.yml` | manual dispatch | open/close named tickers |
 | `backfill-feedback.yml` | manual dispatch | one-off: feedback rows + 30/90d history for past picks (`dry_run` defaults true) |
+| `analysis.yml` | manual dispatch | forward-return report: return by score/pattern/dimension + SPY alpha + entered-vs-blocked (`run_analysis.py`) |
 | `smoke.yml` | every push/PR | runs `run_smoke.py` |
 
 GitHub Actions scheduling is unreliable (often 1–2h late, sometimes skipped); manual
@@ -254,5 +255,10 @@ run_daily.py · run_weekly.py · run_edgar_watch.py · run_smoke.py
   (no CUSIP→ticker map), so 13F picks don't get pre-prompt price context.
 - **ASX coverage** — only via news RSS (no free structured ASX filings API). ASX tickers
   aren't in SEC data, so they skip the sector cap and SIC-based checks.
-- **Score-weight tuning** — once enough closed trades exist, weight patterns by realised P&L.
+- **Score-weight tuning** — `run_analysis.py` is the tool: return by score bucket / pattern /
+  dimension (+ SPY alpha, entered-vs-blocked) over the feedback dataset. Use it to reweight the
+  equal-weighted `total_score` and gate weak patterns once the sample matures (~50+ at 30d).
+- **Legacy duplicate opportunities** — pre-~Jun-2026 data has duplicate rows per ticker (dedup
+  was week-keyed and buggy before `b0e7e80`/`c3222ae`). Current scorer no longer dupes;
+  `run_analysis.py` dedupes by ticker so stats aren't skewed. Not worth a destructive cleanup.
 ```
