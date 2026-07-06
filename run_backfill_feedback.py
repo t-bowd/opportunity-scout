@@ -7,6 +7,10 @@ market price, which is only ~right for a pick that just crossed 30 days. Run ove
 old opportunities it would record today's price as "price_30d" — wrong. Here we
 fetch the actual daily close nearest to (scored_date + 30d) and (+90d).
 
+The fill loop is driven by the OPPORTUNITIES table (not the feedback table) so a
+dry-run reflects the full population — including picks that don't have a feedback
+row yet (every non-entered pick). An absent/empty feedback cell = "would fill".
+
 After this runs once, the score.py wiring keeps new picks covered going forward,
 and pnl_tracker maintains them weekly. Safe to re-run: feedback upsert is
 idempotent and we only fill price_30d/price_90d cells that are still empty.
@@ -22,7 +26,6 @@ from datetime import date, timedelta, datetime, timezone
 from db.client import (
     get_client,
     insert_feedback_rows,
-    get_feedback_pending_pnl,
     update_feedback_pnl,
 )
 
@@ -30,7 +33,7 @@ DRY_RUN = "--dry-run" in sys.argv
 
 
 def _hist_close(ticker: str, target: date) -> float | None:
-    """Daily close nearest to `target` (within a ~5-day window either side).
+    """Daily close nearest to `target` (within a ~6-day window either side).
 
     Picks the session closest to the target date, so weekends/holidays around the
     30/90-day mark still resolve to a real traded price.
@@ -65,22 +68,33 @@ def _hist_close(ticker: str, target: date) -> float | None:
 def run() -> None:
     db = get_client()
 
+    opps = db.table("opportunities").select(
+        "id, vehicle, price_at_score, created_at"
+    ).execute().data
+    print(f"[backfill] {len(opps)} opportunities total")
+
     # 1. Every scored opportunity gets a feedback row (idempotent upsert).
-    opps = db.table("opportunities").select("id").execute().data
     ids = [o["id"] for o in opps]
-    print(f"[backfill] {len(ids)} opportunities total")
     if not DRY_RUN and ids:
         for i in range(0, len(ids), 500):
             insert_feedback_rows(ids[i:i + 500])
-    print(f"[backfill] feedback rows ensured{' (dry-run: skipped)' if DRY_RUN else ''}")
+    print("[backfill] feedback rows "
+          + ("would be created: %d (dry-run)" % len(ids) if DRY_RUN else "ensured"))
 
-    # 2. Fill 30d / 90d historical closes for rows old enough and not yet filled.
+    # 2. Fill 30d / 90d historical closes. Drive from opportunities; look up any
+    #    existing feedback price state by opportunity_id (absent = unfilled, so the
+    #    dry-run simulates exactly what the real run will fill).
+    fb_by_opp = {
+        r["opportunity_id"]: r
+        for r in db.table("feedback")
+        .select("id, opportunity_id, price_30d, price_90d").execute().data
+    }
+
     today = date.today()
-    rows = get_feedback_pending_pnl()
+    verb = "would fill" if DRY_RUN else "filled"
     filled_30 = filled_90 = skipped = 0
 
-    for row in rows:
-        opp = row.get("opportunities") or {}
+    for opp in opps:
         ticker = opp.get("vehicle")
         created_raw = opp.get("created_at", "")
         if not ticker or not created_raw:
@@ -88,15 +102,16 @@ def run() -> None:
             continue
         created = date.fromisoformat(created_raw[:10])
         age = (today - created).days
+        fb = fb_by_opp.get(opp["id"], {})
         updates = {}
 
-        if age >= 30 and row.get("price_30d") is None:
+        if age >= 30 and fb.get("price_30d") is None:
             p = _hist_close(ticker, created + timedelta(days=30))
             if p:
                 updates["price_30d"] = p
                 filled_30 += 1
 
-        if age >= 90 and row.get("price_90d") is None:
+        if age >= 90 and fb.get("price_90d") is None:
             p = _hist_close(ticker, created + timedelta(days=90))
             if p:
                 updates["price_90d"] = p
@@ -106,15 +121,17 @@ def run() -> None:
             ref = opp.get("price_at_score")
             chg = ""
             if ref and updates.get("price_30d"):
-                chg = f"  30d: {ticker} {ref}→{updates['price_30d']} ({(updates['price_30d']/float(ref)-1)*100:+.1f}%)"
+                chg = ("  30d: %s %s→%s (%+.1f%%)" %
+                       (ticker, ref, updates["price_30d"],
+                        (updates["price_30d"] / float(ref) - 1) * 100))
             print(f"[backfill] {ticker} age={age}d{chg}")
             if not DRY_RUN:
                 updates["updated_at"] = "now()"
-                update_feedback_pnl(row["id"], updates)
+                update_feedback_pnl(fb["id"], updates)
             time.sleep(0.2)  # be gentle on Yahoo
 
     print(f"[backfill] done{' (dry-run)' if DRY_RUN else ''} — "
-          f"filled {filled_30} × 30d, {filled_90} × 90d, {skipped} skipped (no ticker/date)")
+          f"{verb} {filled_30} × 30d, {filled_90} × 90d, {skipped} skipped (no ticker/date)")
 
 
 if __name__ == "__main__":
