@@ -150,8 +150,15 @@ the calendar week — so a Friday pick is still actionable Monday; per-pattern r
 
 ## Feedback loop & graduation
 
-- **Automated.** On entry, the feedback row is marked `acted`; on (automated) exit it's
-  auto-graded 1–5 from realised P&L. No manual grading.
+- **A feedback row is created for EVERY scored opportunity** (score.py calls
+  `insert_feedback_rows` on all picks, entered or not) — so `pnl_tracker.py` (weekly)
+  records `price_30d`/`price_90d` forward returns on the whole scored population, not just
+  the ~10 that made it into the full paper book. This is the **signal-quality dataset** for
+  refining scoring, deliberately decoupled from the slot cap (blocked high-conviction picks
+  are the ones we most want labelled). Backfill of historical picks: `run_backfill_feedback.py`
+  (uses *historical* closes at scored_date+30/+90, not current price; idempotent; has `--dry-run`).
+- **Automated grading.** On entry, the feedback row is marked `acted`; on (automated) exit
+  it's auto-graded 1–5 from realised P&L. No manual grading.
 - **Graduation review** at 20 closed trades with positive expectancy. Slower turnover from
   the 60-day holds means this takes ~months — accepted, to measure the real strategy.
 
@@ -165,6 +172,7 @@ the calendar week — so a Friday pick is still actionable Monday; per-pattern r
 | `weekly-digest.yml` | Sunday 6pm AEST | portfolio digest |
 | `edgar-watch.yml` | hourly | early collect+classify (no alerts) |
 | `manual-open.yml` / `manual-close.yml` | manual dispatch | open/close named tickers |
+| `backfill-feedback.yml` | manual dispatch | one-off: feedback rows + 30/90d history for past picks (`dry_run` defaults true) |
 | `smoke.yml` | every push/PR | runs `run_smoke.py` |
 
 GitHub Actions scheduling is unreliable (often 1–2h late, sometimes skipped); manual

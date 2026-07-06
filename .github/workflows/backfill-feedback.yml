@@ -1,0 +1,30 @@
+name: Backfill Feedback Forward Returns
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (report what it would fill, write nothing). Uncheck to actually write."
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Backfill feedback rows + 30/90d historical prices
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python run_backfill_feedback.py ${{ inputs.dry_run && '--dry-run' || '' }}

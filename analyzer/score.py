@@ -11,6 +11,7 @@ from google.genai import types
 from db.client import (
     get_client, insert_opportunity,
     get_recent_opportunity_by_ticker, update_opportunity,
+    insert_feedback_rows,
 )
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -348,6 +349,7 @@ def score_week(week_of: str | None = None) -> list[str]:
     fallback_pattern = signals[0]["pattern"] if signals else "unknown"
 
     inserted_ids = []
+    scored_ids = []   # every opportunity scored this run (new + re-scored) — gets a feedback row
     already_scored = 0
     rescored = 0
     no_price = 0
@@ -441,12 +443,22 @@ def score_week(week_of: str | None = None) -> list[str]:
             row["created_at"] = datetime.now(timezone.utc).isoformat()
             update_opportunity(existing["id"], row)
             rescored += 1
+            scored_ids.append(existing["id"])
             print(f"[score] {row['title']} [{pattern}] — RE-SCORED "
                   f"{existing['total_score']}→{new_total}/20")
         else:
             opp_id = insert_opportunity(row)
             inserted_ids.append(opp_id)
+            scored_ids.append(opp_id)
             print(f"[score] {row['title']} [{pattern}] — score {new_total}/20")
+
+    # Track EVERY scored opportunity for forward-return measurement — a feedback
+    # row per pick (entered or not) so pnl_tracker records its 30/90d price. This
+    # is the signal-quality dataset used to refine scoring; it must not be gated by
+    # the paper-trading slot cap (blocked high-conviction picks are exactly the ones
+    # we most want labelled). Idempotent upsert on opportunity_id.
+    if scored_ids:
+        insert_feedback_rows(scored_ids)
 
     print(
         f"[score] done — {len(inserted_ids)} inserted, {rescored} re-scored higher, "
