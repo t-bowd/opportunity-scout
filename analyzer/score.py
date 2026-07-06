@@ -458,7 +458,12 @@ def score_week(week_of: str | None = None) -> list[str]:
     # the paper-trading slot cap (blocked high-conviction picks are exactly the ones
     # we most want labelled). Idempotent upsert on opportunity_id.
     if scored_ids:
-        insert_feedback_rows(scored_ids)
+        # Fail-safe: this is pure data capture and runs before paper exits — a DB
+        # hiccup here must never crash the run and skip that day's stops/trails.
+        try:
+            insert_feedback_rows(scored_ids)
+        except Exception as e:  # noqa: BLE001 — capture is best-effort
+            print(f"[score] feedback-row capture failed (non-fatal): {e}")
 
     print(
         f"[score] done — {len(inserted_ids)} inserted, {rescored} re-scored higher, "
