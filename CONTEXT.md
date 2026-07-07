@@ -94,7 +94,7 @@ job sends a portfolio digest. An hourly EDGAR watcher collects+classifies early 
 1. Score ≥ **13** (15 in a bearish regime — index >10% below 52w high)
 2. Underlying opportunity within the per-pattern **recency window** (s1/activist 2d,
    insider/smart_money/thematic/etf/pre_ipo 5d, spin_off 7d) — measured from scoring time
-3. Under the position cap (`MAX_POSITIONS=10`) and budget not exhausted
+3. Under the position cap (`MAX_POSITIONS=20`) and budget not exhausted
 4. No duplicate open ticker / not already entered for this opportunity
 5. Price fetchable; price hasn't moved >8% since scoring (no chasing)
 6. Not within 7 days of earnings
@@ -102,17 +102,24 @@ job sends a portfolio digest. An hourly EDGAR watcher collects+classifies early 
    score-time SPAC filter only stops *new* opportunities; IPVVU slipped in from the pool)
 8. **Not a falling knife** (within 10% of 52w low & ≥15% off high, or deep unrecovered
    drawdown) — UNLESS a **multi-insider cluster** (≥2 distinct buyers), which overrides
-9. **Sector cap** — ≤3 open positions per SIC major group (via SEC SIC codes), so insider
+9. **Sector cap** — ≤6 open positions per SIC major group (via SEC SIC codes), so insider
    buying that clusters by sector (e.g. regional banks) can't take over the book
+   (scaled with MAX_POSITIONS to keep ~30% max concentration)
 10. Relative volume ≥1.5× — **news/thematic only**; EDGAR signals are exempt (the filing
     is the signal, not today's tape; liquidity already gated by the $ volume floor)
 11. Position sizes to ≥1 share within remaining budget
+12. **Young-name size cap** — a fresh IPO/new listing with < `MIN_HISTORY_SESSIONS=5`
+    trading sessions of history may still enter (the trailing stop captures an IPO pop)
+    but is held to **base size only** — no conviction upsizing on a score that can't be
+    validated against a price base yet (LIME hit 20/20 on day one, re-scored to 15 two
+    days later). Not a block — IPO capture is intentional; just no oversizing on day one.
 
 Entry pulls from the **last 10 days** of opportunities (`get_recent_opportunities`), not
 the calendar week — so a Friday pick is still actionable Monday; per-pattern recency gates freshness.
 
 ### Position sizing — conviction-scaled within a pool
-- **$2,000 AUD pool**, base **$200/trade**, scaled up: score ≥16 → $300, ≥18 → $400,
+- **$5,000 AUD pool** (raised from $2k to widen the book / collect more closed-trade data),
+  base **$200/trade**, scaled up: score ≥16 → $300, ≥18 → $400 (unless young-name capped),
   capped by remaining budget. Highest-scoring picks are processed first (capital priority).
   `MIN_TRADE_AUD=150`. US ≈ $1 brokerage, ASX $0; 0.5% slippage. FX from Yahoo (USD per AUD, fallback 0.65).
 

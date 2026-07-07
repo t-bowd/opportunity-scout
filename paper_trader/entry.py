@@ -7,7 +7,7 @@ Entry filters (all must pass):
       once liquidity stopped being a heavy score penalty; the market-cap floor
       that guards quality now lives at score time in analyzer/score.py.
   2.  Underlying signal filed within tiered recency window for the pattern
-  3.  Fewer than MAX_POSITIONS open positions (hard ceiling). The $2k pool is a
+  3.  Fewer than MAX_POSITIONS open positions (hard ceiling). The $5k pool is a
       SOFT cap — once full, only score >= HIGH_CONVICTION_SCORE picks may go over it
   4.  No duplicate ticker already open
   5.  Not already entered for this exact opportunity
@@ -64,9 +64,9 @@ DEFAULT_RECENCY = 5
 MIN_SCORE = 13
 BEARISH_MIN_SCORE = 15          # higher bar when broad market is in drawdown
 MARKET_REGIME_THRESHOLD = 0.90  # >10% below 52w high = bearish
-MAX_POSITIONS = 10              # secondary cap; the $2,000 pool is the real limit
+MAX_POSITIONS = 20              # secondary cap; the $5,000 pool is the real limit
 
-# Conviction-scaled position sizing. The $2,000 pool is a SOFT cap (a test budget,
+# Conviction-scaled position sizing. The $5,000 pool is a SOFT cap (a test budget,
 # not a hard risk limit): the default trade is ~$200, stronger picks get more, and
 # while budget remains everything is capped by it. Once the pool is full, only
 # high-conviction picks (score >= HIGH_CONVICTION_SCORE) may go OVER it — so the
@@ -74,11 +74,16 @@ MAX_POSITIONS = 10              # secondary cap; the $2,000 pool is the real lim
 # real hard ceiling. Highest-scoring opportunities are processed first (capital
 # priority). (For real money this soft/hard split should become an explicit dollar
 # risk limit, not just a position count.)
-TOTAL_POOL_AUD = 2000.0
+TOTAL_POOL_AUD = 5000.0
 BASE_POSITION_AUD = 200.0
 MIN_TRADE_AUD = 150.0           # don't open a position smaller than this
 SIZE_TIERS = [(18, 400.0), (16, 300.0)]  # score >= threshold -> target size; else BASE
 HIGH_CONVICTION_SCORE = 18      # picks at/above this may enter over the soft pool
+# A fresh IPO/new listing with fewer than this many trading sessions of history
+# can't have its conviction validated — a day-1 score may be inflated on a single
+# price bar. Such names may still enter (the trailing stop captures an IPO pop) but
+# are held to BASE size, never the upsized conviction tiers.
+MIN_HISTORY_SESSIONS = 5
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
 SLIPPAGE_PCT = 0.5
@@ -105,7 +110,8 @@ CLUSTER_MIN_BUYERS = 2                    # distinct insiders to override the bl
 # Sector diversification — cap open positions per SIC major group. Insider buying
 # clusters by sector (right now: regional banks), so without this the book could
 # load up on one industry. None for tickers SEC doesn't classify (e.g. ASX).
-MAX_SECTOR_POSITIONS = 3
+# Scaled with MAX_POSITIONS to hold the same ~30% max concentration (6/20 = 3/10).
+MAX_SECTOR_POSITIONS = 6
 
 HEADERS = {"User-Agent": "OpportunityScout"}
 
@@ -165,9 +171,12 @@ def _fetch_relative_volume(ticker: str) -> float | None:
         return None
 
 
-def _price_screen(ticker: str) -> tuple[bool, bool]:
+def _price_screen(ticker: str) -> tuple[bool, bool, int | None]:
     """
-    One 1-year fetch, two verdicts: (is_falling_knife, is_spac).
+    One 1-year fetch, three verdicts: (is_falling_knife, is_spac, n_sessions).
+
+    n_sessions is the count of trading sessions of price history (None if the fetch
+    failed) — used to hold fresh IPOs/new listings to base size.
 
     - falling knife: trading within FALLING_KNIFE_ABOVE_LOW_PCT of the 52-week low
       AND meaningfully off the high, or a deep unrecovered drawdown.
@@ -186,17 +195,18 @@ def _price_screen(ticker: str) -> tuple[bool, bool]:
         data = resp.json()["chart"]["result"][0]
         closes = [c for c in data["indicators"]["quote"][0].get("close", []) if c]
         price = data["meta"].get("regularMarketPrice")
+        n_sessions = len(closes) if closes else None
         if not closes or not price:
-            return False, is_spac
+            return False, is_spac, n_sessions
         hi, lo = max(closes), min(closes)
         from_high = (price - hi) / hi * 100
         above_low = (price - lo) / lo * 100
         near_low = above_low <= FALLING_KNIFE_ABOVE_LOW_PCT and from_high <= FALLING_KNIFE_MIN_DRAWDOWN_PCT
         deep_dd = from_high <= FALLING_KNIFE_DEEP_DD_PCT and above_low <= FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT
         flat_at_ten = lo > 0 and (hi - lo) / lo < 0.08 and 9.0 <= price <= 11.0
-        return (near_low or deep_dd), (is_spac or flat_at_ten)
+        return (near_low or deep_dd), (is_spac or flat_at_ten), n_sessions
     except Exception:
-        return False, is_spac  # fail open on the knife; keep the suffix SPAC check
+        return False, is_spac, None  # fail open on the knife; keep the suffix SPAC check
 
 
 def _market_is_bearish(is_asx: bool) -> bool:
@@ -257,7 +267,7 @@ def run_entries(week_of: str | None = None) -> None:
     open_count = len(open_positions)
     open_tickers = {p["ticker"] for p in open_positions}
 
-    # Budget = the $2,000 pool minus what's already deployed in open positions.
+    # Budget = the $5,000 pool minus what's already deployed in open positions.
     deployed = sum(
         float(p["entry_price_aud"]) * p["quantity"] + float(p.get("brokerage_aud", 0))
         for p in open_positions
@@ -355,7 +365,7 @@ def run_entries(week_of: str | None = None) -> None:
             continue
 
         pattern = opp.get("pattern", "")
-        knife, is_spac = _price_screen(ticker)
+        knife, is_spac, n_sessions = _price_screen(ticker)
 
         # 8a. SPAC / unit guard — never trade blank-check shells or units/warrants.
         # Hard block (no override): score-time filter only stops NEW opportunities,
@@ -410,6 +420,16 @@ def run_entries(week_of: str | None = None) -> None:
         # deliberately over the pool; marginal picks skip. MAX_POSITIONS (checked
         # above) is the hard ceiling either way.
         conviction_size = _target_position_size(score)
+        # Young-name guard: a fresh IPO/new listing (< MIN_HISTORY_SESSIONS of price
+        # history) can't have its conviction validated — a day-1 score may be inflated
+        # on a single bar (LIME hit 20/20 on day one, then re-scored to 15 once it had
+        # some history). Still enter it — the trailing stop captures an IPO pop — but
+        # only at BASE size, never the upsized conviction tiers.
+        if (n_sessions is not None and n_sessions < MIN_HISTORY_SESSIONS
+                and conviction_size > BASE_POSITION_AUD):
+            print(f"[paper/entry] {ticker} only {n_sessions} session(s) of history "
+                  f"— capping to base size (no conviction upsizing)")
+            conviction_size = BASE_POSITION_AUD
         if remaining_budget >= MIN_TRADE_AUD:
             target_aud = min(conviction_size, remaining_budget)
         elif score >= HIGH_CONVICTION_SCORE:
