@@ -1,0 +1,55 @@
+name: Small-Cap Catalyst Screen
+
+# Standalone from Daily Collection on purpose — this is the read-only Phase 1
+# watchlist for the small-cap catalyst sleeve. It opens no positions, writes no
+# DB, and needs no secrets (all sources are free/public). Runs at US close so the
+# "climbing" momentum reflects the full session and the list lands in the AU
+# morning, separate from the mid-session trading daily.
+
+on:
+  schedule:
+    - cron: "30 21 * * *"   # 21:30 UTC ≈ US close / ~07:30 AEST next day
+  workflow_dispatch:
+    inputs:
+      max_cap:
+        description: "Max market cap in $M"
+        default: "2000"
+      min_cap:
+        description: "Min market cap in $M"
+        default: "10"
+      asx_scan:
+        description: "How many ASX materials/energy names to scan"
+        default: "60"
+      limit:
+        description: "Max rows to print"
+        default: "40"
+      climbing_only:
+        description: "Only show currently-climbing names"
+        type: boolean
+        default: false
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run small-cap catalyst screen
+        run: |
+          FLAGS="--max-cap ${{ github.event.inputs.max_cap || '2000' }}"
+          FLAGS="$FLAGS --min-cap ${{ github.event.inputs.min_cap || '10' }}"
+          FLAGS="$FLAGS --asx-scan ${{ github.event.inputs.asx_scan || '60' }}"
+          FLAGS="$FLAGS --limit ${{ github.event.inputs.limit || '40' }}"
+          if [ "${{ github.event.inputs.climbing_only }}" = "true" ]; then
+            FLAGS="$FLAGS --climbing-only"
+          fi
+          echo "Running: python run_smallcap_screen.py $FLAGS"
+          python run_smallcap_screen.py $FLAGS
