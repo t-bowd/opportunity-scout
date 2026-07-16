@@ -1,0 +1,32 @@
+name: Small-Cap Sleeve Paper Trade
+
+# Phase 2 — paper-trades the small-cap catalyst sleeve. Walled off from Daily
+# Collection: own smallcap_* tables, own $1,000 pool, own stats. daily.yml is
+# untouched. Needs the smallcap_* tables to exist (smallcap/schema.sql) and the
+# Supabase secrets. Runs after US close, separate from the 16:00 trading daily
+# and the 21:30 read-only screen.
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 22:00 UTC ≈ just after US close
+  workflow_dispatch:
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run small-cap sleeve paper trade
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python run_smallcap_trade.py
