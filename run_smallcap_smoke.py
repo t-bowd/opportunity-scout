@@ -25,7 +25,7 @@ def check(name, cond):
 
 
 def _pos(**kw):
-    base = {"entry_price_aud": 1.0, "entry_date": "2026-07-01",
+    base = {"entry_price_aud": 1.0, "entry_date": "2026-07-01", "vertical": "biotech",
             "peak_price_aud": 1.0, "trailing_stop_active": False, "catalyst_date": None}
     base.update(kw)
     return base
@@ -80,13 +80,19 @@ check("no tight stop: -10% just holds", c["action"] == "hold")
 c = evaluate(_pos(catalyst_date="2026-11-01", peak_price_aud=1.0), price_aud=0.64, today=TODAY)
 check("disaster_stop at -35%", c["reason"] == "disaster_stop" and c["action"] == "exit")
 
-# Time limit only for non-dated (asx_ann) positions.
-c = evaluate(_pos(catalyst_date=None, entry_date="2026-05-01", peak_price_aud=1.05),
-             price_aud=1.0, today=TODAY)
-check("time_limit fires for non-dated after 45d", c["reason"] == "time_limit" and c["action"] == "exit")
+# asx_ann positions have a PAST announcement date but must be treated as non-dated:
+# no pre-catalyst exit (regression test for the day-after-entry close bug), and the
+# time limit applies instead.
+c = evaluate(_pos(vertical="asx_ann", catalyst_date="2026-07-07", peak_price_aud=1.0),
+             price_aud=0.98, today=TODAY)
+check("asx_ann past date does NOT pre_catalyst-close (regression)", c["action"] == "hold")
 
-c = evaluate(_pos(catalyst_date="2026-11-01", entry_date="2026-05-01", peak_price_aud=1.05),
-             price_aud=1.0, today=TODAY)
+c = evaluate(_pos(vertical="asx_ann", catalyst_date="2026-06-01", entry_date="2026-05-01",
+                  peak_price_aud=1.05), price_aud=1.0, today=TODAY)
+check("time_limit fires for asx_ann after 45d", c["reason"] == "time_limit" and c["action"] == "exit")
+
+c = evaluate(_pos(vertical="biotech", catalyst_date="2026-11-01", entry_date="2026-05-01",
+                  peak_price_aud=1.05), price_aud=1.0, today=TODAY)
 check("no time_limit for dated biotech", c["action"] == "hold")
 
 print("passes_gates:")

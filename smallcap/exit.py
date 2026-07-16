@@ -86,9 +86,17 @@ def evaluate(pos: dict, price_aud: float, today: date) -> dict:
     result = {"action": "hold", "reason": "", "pnl_pct": round(pnl_pct, 1),
               "new_peak_aud": round(new_peak, 4), "trail_active": trail_active}
 
-    # 1. Pre-catalyst — the edge. Exit before any dated binary readout, any P&L.
+    # Only biotech has a FUTURE-dated binary readout to exit ahead of. asx_ann /
+    # defense catalysts have already fired (their stored date is in the PAST), so
+    # they are treated as non-dated: no pre-catalyst exit, and the time limit
+    # applies instead. Keying off vertical (not "is a date present") is essential —
+    # otherwise every asx_ann name closes the day after entry (its past
+    # announcement date reads as "0 business days to the readout").
+    is_dated = pos.get("vertical") == "biotech"
     cat = parse_catalyst_date(pos.get("catalyst_date"))
-    if cat is not None and business_days_until(cat, today) <= PRE_CATALYST_EXIT_DAYS:
+
+    # 1. Pre-catalyst — the edge. Exit before the biotech readout, any P&L.
+    if is_dated and cat is not None and business_days_until(cat, today) <= PRE_CATALYST_EXIT_DAYS:
         result.update(action="exit", reason="pre_catalyst")
         return result
 
@@ -105,8 +113,9 @@ def evaluate(pos: dict, price_aud: float, today: date) -> dict:
         result.update(action="exit", reason="disaster_stop")
         return result
 
-    # 4. Time limit — only for non-dated (asx_ann) positions.
-    if cat is None:
+    # 4. Time limit — for non-dated (asx_ann / defense) positions whose catalyst
+    # has already fired and which never ran.
+    if not is_dated:
         held = (today - _parse_date(pos["entry_date"])).days
         if held >= TIME_LIMIT_DAYS:
             result.update(action="exit", reason="time_limit")
