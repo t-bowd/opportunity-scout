@@ -108,10 +108,15 @@ def run_entries() -> None:
         if deployed + cost > SMALLCAP_POOL_AUD:
             continue
 
+        # Normalise the catalyst date to a full ISO date — the feed gives partial
+        # 'YYYY-MM' values that a Postgres `date` column rejects. parse_catalyst_date
+        # resolves partials to the 1st of the period (conservative for the
+        # pre-catalyst exit — bail early rather than hold into an ambiguous window).
+        cat_parsed = parse_catalyst_date(cand.get("catalyst_date"))
         store.insert_position({
             "ticker": cand["ticker"], "name": cand["name"], "exchange": cand["exchange"],
             "vertical": cand["vertical"], "catalyst": cand.get("catalyst", ""),
-            "catalyst_date": cand.get("catalyst_date") or None,
+            "catalyst_date": cat_parsed.isoformat() if cat_parsed else None,
             "market_cap": cand["market_cap"],
             "entry_date": today.isoformat(),
             "entry_price_native": round(entry_native, 4), "entry_price_aud": entry_aud,
