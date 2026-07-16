@@ -1,8 +1,9 @@
 # Small-Cap Catalyst Sleeve — Phase 2 Spec (paper trading)
 
-**Status:** DRAFT for review. Phase 1 (read-only screener) is live and shipped.
-Phase 2 adds paper trading. Numbers below are **proposals to react to**, grounded
-in the 07-13 → 07-15 screener series, not settled truth.
+**Status:** DECIDED (2026-07-16) — Tim signed off on §9; numbers below are settled
+for v1. Phase 1 (read-only screener) is live and shipped. Phase 2 (this) adds
+paper trading and is ready to build. Params are grounded in the 07-13 → 07-15
+screener series and are expected to be overturned by data, not by argument.
 
 **Prime directive: this sleeve is walled off from the main paper book.** Nothing
 here may read, write, or influence main-book state. See §1.
@@ -44,10 +45,17 @@ A −12% stop and a 10% trail would have shredded most of these mid-swing.
 ## 3. Pool & sizing
 
 ```
-SMALLCAP_POOL_AUD      = 500.0   # HARD cap (not soft like the main book)
-SMALLCAP_POSITION_AUD  =  50.0   # EQUAL weight — no conviction scaling
-SMALLCAP_MAX_POSITIONS =  10
+SMALLCAP_POOL_AUD      = 1000.0  # HARD cap (not soft like the main book)
+SMALLCAP_POSITION_AUD  =  100.0  # EQUAL weight — no conviction scaling
+SMALLCAP_MAX_POSITIONS =   10
 ```
+
+**Why 10 × $100 and not 20 × $50?** Power-law strategies want *more* bets, so 20
+would be the instinct. But the **5-per-vertical correlation cap (§6) is the
+binding constraint** — only two verticals are productive today (`biotech`,
+`asx_ann`), so 5+5 = 10 is the practical ceiling. Widening to 20 would mean ~10
+biotech positions, i.e. exactly the fake-diversification trap the 07-14 broad
+cooling exposed. If a third vertical becomes productive, revisit 20 × $50.
 
 - **Hard budget, not soft.** The main book lets high-conviction picks breach its
   pool. The sleeve must not: spec money is strictly bounded. (This also rehearses
@@ -67,10 +75,24 @@ A candidate must clear **all** of:
 1. **On the screen as climbing (▲).** Momentum is the entry gate — the main book
    has no such requirement, the sleeve is built on it.
 2. **Has a catalyst** from a supported vertical (`biotech`, `asx_ann`, `defense`).
-3. **Market cap** within `$10M–$2B`.
+3. **Market cap** within `$10M–$500M` (DECIDED: tightened from $2B).
+   Power-law upside needs a **small base** — a $2B biotech doubling requires $2B
+   of buying, which is a main-book-shaped outcome, not a sleeve-shaped one. The
+   20x lives at $10–200M. Both our best names fit (AKBA $370M, ERE.AX $10M), and
+   the 07-15 run had ~14 climbers under $500M — comfortably enough to fill 10
+   slots. **Accepted tradeoff:** this pushes us into the least liquid, most
+   promoted end of the market — precisely where paper fills lie most (§7.1). We
+   chose the segment where measurement is weakest because it's where the upside
+   is. That was deliberate. The $10M floor stays, to skip dead shells.
 4. **Catalyst freshness — by vertical** (the two feeds behave differently):
    - `biotech` (scheduled readouts): catalyst date must be **in the future**.
-     Already-fired readouts are excluded — the move may be spent (TTRX-type).
+     (DECIDED: keep strict.) The real reason isn't that already-fired names can't
+     work — it's that **the pre-catalyst exit (§5.1) needs a future date to
+     exist**. An already-fired biotech name has no upcoming event to sell into, so
+     it would fall through to trail/time exits — a *different strategy*
+     (post-news momentum drift) quietly mixed into the same book, muddying the
+     data. One book, one hypothesis. If post-news drift looks interesting later,
+     it earns its own tracked cohort. TTRX-type movers are excluded on purpose.
    - `asx_ann` (event-driven, inherently past-dated): announcement within the
      **last 10 days**. Requiring "future" would kill this vertical entirely.
 5. **Not already held**; no duplicate ticker.
@@ -88,10 +110,17 @@ Precedence order: **pre-catalyst → trailing → disaster → time.**
 
 ```
 PRE_CATALYST_EXIT_DAYS   = 2      # exit N business days BEFORE a dated binary event
-TRAIL_ARM_PCT            = 50.0   # arm the trail only once it's a real multi-bagger
-TRAIL_PCT                = 25.0   # trail 25% below peak (vs main book's 10%)
+TRAIL_ARM_PCT            = 30.0   # DECIDED: arm at +30% (was proposed +50%)
 DISASTER_STOP_PCT        = -35.0  # "thesis broken", not risk management
 TIME_LIMIT_DAYS          = 45     # for non-dated catalysts only
+
+# DECIDED: ratcheting trail — starts at 20%, TIGHTENS as the gain grows.
+# (peak_gain_pct_threshold, trail_pct) — first match wins, highest first.
+TRAIL_TIERS = [
+    (300.0, 15.0),   # +300%+      -> trail 15%
+    (100.0, 17.0),   # +100..299%  -> trail 17%
+    (  0.0, 20.0),   # +30..99%    -> trail 20% (baseline once armed)
+]
 ```
 
 ### 5.1 Pre-catalyst exit — the single most important rule
@@ -106,14 +135,26 @@ the sleeve *exits before* the event).
 Applies to `biotech` only. `asx_ann` catalysts have already fired — nothing to
 exit ahead of.
 
-### 5.2 Trailing stop — much wider than the main book
-Arm at **+50%**, trail **25%** below the running peak, latched (same latch logic
-as the main book — arm off the stored peak, never disarm on a dip).
+### 5.2 Trailing stop — wider than the main book, and it tightens as it climbs
+Arm at **+30%**, then trail per `TRAIL_TIERS` below the running peak, latched
+(same latch logic as the main book — arm off the *stored peak*, never disarm on a
+dip).
+
+Two distinct mechanics, easily confused:
+1. **The floor rises with the peak** — automatic, standard, and already how the
+   main book behaves (GLBE ratcheted $49.55 → $50.08 over 07-13→07-15).
+2. **The trail % itself tightens** as the gain grows (`TRAIL_TIERS`) — this is the
+   sleeve-specific addition. 20% baseline → 17% past +100% → 15% past +300%.
 
 Rationale: the main book's +20%/10% is calibrated for names that move a few % a
 day. These move 20%+ in a session; a 10% trail would fire on noise constantly.
-+50% arm means we only protect genuine multi-baggers; a 25% trail gives room to
-breathe. **This is the #1 parameter to tune once we have give-back data.**
+
+**Why the tightening is deliberately GENTLE (never below 15%):** in a power-law
+book **the tail is the entire return**. Choking a +500% name with a 12% trail on a
+stock that swings 20% in a session cuts off the one position that pays for the
+other nine. Protecting gains and capturing the tail are in direct tension here,
+and the tail wins. **This tier table is the #1 thing to tune once we have
+give-back data.**
 
 ### 5.3 Disaster stop
 **−35%**, not −12%. This is a "the thesis is broken" brake, not a risk tool. Our
@@ -176,15 +217,22 @@ Not "did it make money" — the sample is too small. Instead, after ~4–6 weeks
 
 ---
 
-## 9. Open decisions (need Tim's call)
+## 9. Decisions — RESOLVED 2026-07-16
 
-1. **Pool: $500 or $1,000?** ($500 = 10 × $50; $1,000 = 10 × $100 or 20 × $50.)
-2. **Trail arm at +50% — too high?** If nothing ever arms it, we learn nothing.
-   A +30% arm / 20% trail is the more conservative alternative.
-3. **Biotech future-dated only** (§4.4) — this excludes TTRX-type already-fired
-   movers entirely. Correct, or too strict?
-4. **Cap band:** keep `$10M–$2B`, or tighten to the micro end (`≤$500M`) where the
-   moonshots actually live? AKBA ($370M) and ERE.AX ($10M) both fit ≤$500M.
+| # | Question | Decision |
+|---|---|---|
+| 1 | Pool size | **$1,000** → 10 × $100 equal weight. Not 20 × $50: the 5/vertical cap binds at 10 (§3). |
+| 2 | Trail | **Arm +30%, trail 20%, ratcheting tighter** (17% past +100%, 15% past +300%). Gentle on purpose — the tail is the whole return (§5.2). |
+| 3 | Biotech future-dated only | **Yes, strict.** The pre-catalyst exit needs a future date to exist; already-fired names would silently be a different strategy (§4.4). |
+| 4 | Cap band | **$10M–$500M.** Power-law upside needs a small base. Accepted tradeoff: least liquid, most promoted end (§4.3, §7.1). |
+
+### Still open (deferred, not blocking the build)
+- Whether the **+30% arm ever fires at all.** If nothing arms across 4–6 weeks,
+  the arm is too high and should drop to ~+20%. This is a success criterion (§8),
+  not a pre-build decision.
+- Whether `defense` ever earns a slot (currently ~0 matches).
+- Whether a **post-news drift** cohort (the excluded TTRX-types) deserves its own
+  separate tracked book later.
 
 ---
 
