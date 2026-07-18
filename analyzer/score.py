@@ -169,6 +169,36 @@ def _log_signal_breakdown(cutoff: str) -> None:
         print(f"[score]   not scored: " + ", ".join(f"{p}×{c}" for p, c in sorted(skipped.items())))
 
 
+# Cache of currency -> USD-per-unit rate, so a run scoring several non-USD names
+# hits Yahoo once per currency, not once per ticker.
+_FX_TO_USD: dict[str, float] = {"USD": 1.0}
+_FX_FALLBACK = {"AUD": 0.65}  # used only if the live fetch fails
+
+
+def _usd_per_unit(currency: str) -> float:
+    """
+    USD per 1 unit of `currency` (e.g. AUD -> ~0.65). Used to normalise dollar
+    volume to USD before the tradeability floor, since Yahoo reports price in the
+    listing currency (ASX names come back in AUD). Without this, a $1M-USD floor
+    is really a ~$0.65M-USD floor for ASX names — they clear it ~35% too easily.
+    """
+    if not currency:
+        return 1.0
+    if currency in _FX_TO_USD:
+        return _FX_TO_USD[currency]
+    import requests
+    try:
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{currency}USD=X"
+               "?interval=1d&range=5d")
+        resp = requests.get(url, headers={"User-Agent": "OpportunityScout"}, timeout=10)
+        rate = resp.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
+    except Exception:
+        rate = _FX_FALLBACK.get(currency, 1.0)
+        print(f"[score] FX {currency}->USD fetch failed, using fallback {rate}")
+    _FX_TO_USD[currency] = rate
+    return rate
+
+
 def _get_price_context(ticker: str) -> dict:
     """
     Fetch price, 52-week high/low, YTD, and average daily DOLLAR volume from
@@ -178,6 +208,10 @@ def _get_price_context(ticker: str) -> dict:
     Average dollar volume (price × avg daily share volume) is our tradeability
     proxy in place of market cap, which the chart API does not expose. It cleanly
     separates real names (AAPL ~$14B/day) from nano-cap junk (ASPS ~$0.2M/day).
+    It is normalised to USD (Yahoo prices non-US names in their listing currency)
+    so the floor and the liquidity description mean the same thing on every
+    exchange. `price` stays in the listing currency — downstream entry/exit
+    handle the AUD/USD conversion themselves.
 
     All fields may be None if the fetch fails.
     """
@@ -199,10 +233,12 @@ def _get_price_context(ticker: str) -> dict:
             if closes and closes[0] and price
             else None
         )
-        # Average daily dollar volume over the last ~60 sessions
+        # Average daily dollar volume over the last ~60 sessions, normalised to
+        # USD (Yahoo prices ASX names in AUD) so the floor is a true USD bar.
         recent_vols = volumes[-60:] if volumes else []
         avg_dollar_volume = (
-            round(price * (sum(recent_vols) / len(recent_vols)))
+            round(price * (sum(recent_vols) / len(recent_vols))
+                  * _usd_per_unit(meta.get("currency", "USD")))
             if recent_vols and price
             else None
         )
