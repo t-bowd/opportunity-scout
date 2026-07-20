@@ -281,9 +281,15 @@ def run_entries(week_of: str | None = None) -> None:
         if sk:
             open_sectors[sk] += 1
 
-    if open_count >= MAX_POSITIONS:
-        print(f"[paper/entry] {open_count} positions open — no slots, skipping")
-        return
+    # At the hard position ceiling we stop auto-entering, but we no longer return
+    # blind. Keep evaluating and surface anything that clears every gate as a
+    # REVIEW line, so a compelling pick can be assessed by hand (manual_open.py)
+    # instead of silently passing by while the book is full. Auto-entry resumes on
+    # its own as soon as a close frees a slot — no flag to remember to flip back.
+    review_only = open_count >= MAX_POSITIONS
+    if review_only:
+        print(f"[paper/entry] {open_count}/{MAX_POSITIONS} positions — at max, "
+              f"REVIEW ONLY: no auto-entry, qualifying picks listed for manual assessment")
     if remaining_budget < MIN_TRADE_AUD:
         # Soft pool is full — don't stop. High-conviction picks (score >=
         # HIGH_CONVICTION_SCORE) may still enter over the pool; marginal ones skip.
@@ -301,6 +307,7 @@ def run_entries(week_of: str | None = None) -> None:
         print(f"[paper/entry] ASX market regime: BEARISH — min score raised to {BEARISH_MIN_SCORE}")
 
     entered = 0
+    reviewed = 0   # candidates surfaced for manual assessment (review mode only)
 
     for opp in opportunities:
         ticker = opp.get("vehicle", "")
@@ -325,8 +332,9 @@ def run_entries(week_of: str | None = None) -> None:
             skip(f"score_{score}_below_{min_score}{'_bearish_regime' if bearish else ''}")
             continue
 
-        # 2. Position cap
-        if open_count >= MAX_POSITIONS:
+        # 2. Position cap — in review mode we are at the ceiling by definition, so
+        # keep evaluating candidates instead of breaking out with nothing to show.
+        if open_count >= MAX_POSITIONS and not review_only:
             skip("max_positions_reached")
             break
 
@@ -442,6 +450,20 @@ def run_entries(week_of: str | None = None) -> None:
             skip(f"price_too_high_aud:{entry_price_aud:.2f}")
             continue
 
+        # Book is full — surface this as a manual-assessment candidate and move on.
+        # Deliberately mutates NO state (open_count / remaining_budget / sector
+        # counts / entered): nothing was bought, so every later candidate is still
+        # judged against the real book. Log only, no notify.
+        if review_only:
+            reviewed += 1
+            cost_aud = entry_price_aud * quantity + brokerage
+            print(
+                f"[paper/entry] REVIEW {ticker} ({market}) score {score}/20 "
+                f"[{opp.get('pattern', 'unknown')}] — would be ${entry_price_aud:.2f} AUD "
+                f"× {quantity} = ${cost_aud:.2f} AUD. Book at max; assess by hand."
+            )
+            continue
+
         pos = {
             "opportunity_id": opp_id,
             "ticker": ticker,
@@ -481,7 +503,9 @@ def run_entries(week_of: str | None = None) -> None:
         notify_opened(ticker, market, entry_price_aud, quantity, cost_aud, score,
                       opp.get("pattern", "unknown"), opp.get("plain_english", ""))
 
+    review_note = f", {reviewed} awaiting manual review" if review_only else ""
     print(
-        f"[paper/entry] done — {entered} entered, {open_count}/{MAX_POSITIONS} open, "
+        f"[paper/entry] done — {entered} entered{review_note}, "
+        f"{open_count}/{MAX_POSITIONS} open, "
         f"${TOTAL_POOL_AUD - remaining_budget:.0f}/${TOTAL_POOL_AUD:.0f} deployed"
     )
