@@ -41,6 +41,25 @@ SCORE_LOOKBACK_DAYS = 8
 # late last week updates its existing row instead of spawning a duplicate.
 RESCORE_LOOKBACK_DAYS = 14
 
+
+def _rescore_action(new_total: int, existing: dict | None) -> str:
+    """
+    How a freshly computed score relates to the most recent stored score for the
+    same ticker. Pure (no DB/network) so it can be smoke-tested — this is the rule
+    that decides whether a stale score can be pulled DOWN, so it must not silently
+    regress. Returns one of:
+      'insert'        — no recent row; create one
+      'unchanged'     — identical score; no-op
+      'rescore_up'    — higher read; update AND reset the recency window (fresh signal)
+      'rescore_down'  — lower read; update but PRESERVE created_at (same signal, cooled)
+    """
+    if existing is None:
+        return "insert"
+    prev = existing.get("total_score") or 0
+    if new_total == prev:
+        return "unchanged"
+    return "rescore_up" if new_total > prev else "rescore_down"
+
 SCORING_PROMPT = """You are scoring stock market opportunities for a retail investor based in Australia.
 
 You will receive signals from SEC filings (Form 4 insider buys, S-1 IPOs, 13F institutional holdings, 13D activist stakes) and financial news including Australian sources (ASX announcements, SMH, ABC Business).
@@ -387,7 +406,8 @@ def score_week(week_of: str | None = None) -> list[str]:
     inserted_ids = []
     scored_ids = []   # every opportunity scored this run (new + re-scored) — gets a feedback row
     already_scored = 0
-    rescored = 0
+    rescored_up = 0
+    rescored_down = 0
     no_price = 0
     too_small = 0
     spac_skipped = 0
@@ -397,15 +417,19 @@ def score_week(week_of: str | None = None) -> list[str]:
         if not ticker:
             continue
 
-        # Re-score handling: keep one opportunity per ticker within the recent
-        # window, but if a later run scores it HIGHER (e.g. an insider cluster
-        # grew), update the stored row rather than discarding the stronger read.
+        # Re-score handling: keep ONE opportunity per ticker within the recent
+        # window and move its score to the latest read in EITHER direction. The
+        # score is our best current estimate of conviction, so a cooler later read
+        # must be allowed to pull it DOWN — otherwise a stale high sticks (a name
+        # scored 18 on Monday, 15 today, stays 18) and keeps breaching the pool and
+        # surfacing for manual review at a conviction it no longer merits. Only an
+        # unchanged score is a genuine no-op.
         new_total = (opp.get("conviction", 0) + opp.get("asymmetry", 0)
                      + opp.get("liquidity", 0) + opp.get("timing", 0))
         existing = get_recent_opportunity_by_ticker(ticker, RESCORE_LOOKBACK_DAYS)
-        if existing and new_total <= (existing.get("total_score") or 0):
-            print(f"[score] {ticker} already scored {existing['total_score']}/20 "
-                  f"(>= new {new_total}), keeping")
+        action = _rescore_action(new_total, existing)
+        if action == "unchanged":
+            print(f"[score] {ticker} unchanged at {new_total}/20 — keeping")
             already_scored += 1
             continue
 
@@ -473,15 +497,24 @@ def score_week(week_of: str | None = None) -> list[str]:
             "signal_type_explainer": opp.get("signal_type_explainer", ""),
         }
         if existing:
-            # Stronger re-score — refresh the stored row, including created_at so
-            # the recency window resets (a cluster that grew today is fresh signal).
-            from datetime import datetime, timezone
-            row["created_at"] = datetime.now(timezone.utc).isoformat()
+            prev = existing.get("total_score") or 0
+            went_up = action == "rescore_up"
+            # A HIGHER re-score is driven by fresh signal (e.g. the insider cluster
+            # grew today), so reset created_at to re-open the recency window. A
+            # LOWER re-score is the SAME signal re-evaluated cooler — not fresh — so
+            # leave created_at out of the update (it's a partial update, so the
+            # original timestamp is preserved) and let the name age out normally;
+            # don't let a fading pick look brand new to the entry recency gate.
+            if went_up:
+                from datetime import datetime, timezone
+                row["created_at"] = datetime.now(timezone.utc).isoformat()
+                rescored_up += 1
+            else:
+                rescored_down += 1
             update_opportunity(existing["id"], row)
-            rescored += 1
             scored_ids.append(existing["id"])
             print(f"[score] {row['title']} [{pattern}] — RE-SCORED "
-                  f"{existing['total_score']}→{new_total}/20")
+                  f"{prev}→{new_total}/20 {'↑' if went_up else '↓'}")
         else:
             opp_id = insert_opportunity(row)
             inserted_ids.append(opp_id)
@@ -502,8 +535,9 @@ def score_week(week_of: str | None = None) -> list[str]:
             print(f"[score] feedback-row capture failed (non-fatal): {e}")
 
     print(
-        f"[score] done — {len(inserted_ids)} inserted, {rescored} re-scored higher, "
-        f"{already_scored} already scored recently, "
+        f"[score] done — {len(inserted_ids)} inserted, "
+        f"{rescored_up} re-scored up, {rescored_down} re-scored down, "
+        f"{already_scored} unchanged, "
         f"{no_price} skipped (no price), {too_small} skipped (too small), "
         f"{spac_skipped} skipped (SPAC/unit)"
     )

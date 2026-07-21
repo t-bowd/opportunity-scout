@@ -101,6 +101,14 @@ check("score._prioritize_signals dedupe+cap", lambda: (
 )(score._prioritize_signals(
     [{"id": str(i), "signal_date": f"2026-06-0{i % 9 + 1}", "pattern": "insider_buy",
       "raw_data": {"ticker": f"T{i % 5}"}} for i in range(30)], 5)))
+def _check_rescore_action():
+    ra = score._rescore_action
+    assert ra(17, None) == "insert"            # no prior row
+    assert ra(18, {"total_score": 18}) == "unchanged"
+    assert ra(19, {"total_score": 16}) == "rescore_up"
+    assert ra(15, {"total_score": 18}) == "rescore_down"   # the fix: highs CAN fall
+    assert ra(18, {"total_score": None}) == "rescore_up"   # null prior treated as 0
+check("score._rescore_action both directions", _check_rescore_action)
 check("entry._target_position_size tiers",
       lambda: [entry._target_position_size(s) for s in (13, 16, 18)])
 check("exit._pnl_to_grade",
