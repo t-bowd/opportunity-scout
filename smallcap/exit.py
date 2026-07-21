@@ -14,6 +14,7 @@ through it), a wide +30% arm, a ratcheting trail that only gently tightens, and 
 from datetime import date, datetime, timedelta
 
 from smallcap import store
+from smallcap.momentum import momentum
 from smallcap.pricing import current_price_native, to_aud
 
 # --- Parameters (SPEC §5, DECIDED 2026-07-16) ---
@@ -130,6 +131,31 @@ def _parse_date(s) -> date:
     return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
 
 
+def _climbing_note(ticker: str) -> str:
+    """
+    OBSERVATION ONLY — deliberately never influences an exit decision.
+
+    The entry thesis is "catalyst on a name that is ALREADY climbing". When that
+    momentum breaks the thesis has arguably gone, but price alone may not have
+    tripped anything: JSPR (2026-07-20) peaked +25%, fell off the screen's
+    climbing list, yet sat far from the -35% disaster stop and months from its
+    readout. Logging the verdict next to each HOLD builds the record needed to
+    judge, at the 4-6 week review, whether a momentum-invalidation exit earns a
+    place — rather than narrowing the trail, which would clip the power-law
+    winners the sleeve exists to catch.
+
+    Fails soft to "" so a data hiccup can never break the exit run.
+    """
+    try:
+        m = momentum(ticker)
+    except Exception:  # noqa: BLE001 — instrumentation must not break exits
+        return ""
+    if not m:
+        return " | climbing n/a"
+    return (" | climbing" if m["climbing"]
+            else f" | NOT climbing (20d {m['ret_20d']:+.0f}%)")
+
+
 def run_exits() -> None:
     """Evaluate every open sleeve position and persist holds/exits."""
     today = date.today()
@@ -167,5 +193,5 @@ def run_exits() -> None:
             arm = " | trail armed" if d["trail_active"] else ""
             cat = pos.get("catalyst_date") or "no date"
             print(f"[smallcap/exit] HOLD {tkr} — {held}d, {d['pnl_pct']:+.1f}% "
-                  f"(catalyst {cat}){arm}")
+                  f"(catalyst {cat}){arm}{_climbing_note(tkr)}")
     print(fx_note, end="")
