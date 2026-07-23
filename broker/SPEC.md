@@ -131,15 +131,15 @@ ALTER TABLE paper_positions
 No new status values needed — broker fills map onto the existing
 `closed_trail` / `closed_stop` / `closed_time`.
 
-## 9. Decisions to resolve before build
+## 9. Decisions — RESOLVED 2026-07-24
 
-- **A. Legacy US positions** — A1 wind-down (recommended) vs A2 adopt. See §6.
-- **B. Native −12% hard stop for US** — recommended YES (§5): it fixes the
-  LRV-style gap-through on the hard stop too. Say no and we keep the −12% stop
-  poll-driven and only the trailing stop goes native.
-- **C. Entry order type** — market DAY (recommended; fills intraday at ~13:10 ET)
-  vs limit at last-close + buffer (avoids a bad market fill on a thin name, but
-  may not fill).
+- **A. Legacy US positions → A1 wind-down.** New US entries route to Alpaca
+  immediately; the ~13 existing open US positions ride out on the simulator
+  until they close naturally. No fake backfill.
+- **B. Native −12% hard stop for US → YES.** The −12% stop rests as an intraday
+  Alpaca `stop` order, swapped for the `trailing_stop` on arm (§5). Fixes the
+  LRV-style gap-through on the hard stop too.
+- **C. Entry order type → market DAY.** Fills intraday at ~13:10 ET.
 
 ## 10. Build order (once §9 lands)
 

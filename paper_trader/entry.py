@@ -29,6 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from collectors.edgar import get_sector_key
 from paper_trader.notify import notify_opened
+from broker import execution as broker_execution
 from db.client import (
     get_recent_opportunities,
     get_open_paper_positions,
@@ -464,6 +465,18 @@ def run_entries(week_of: str | None = None) -> None:
             )
             continue
 
+        # US names route through the broker (Alpaca) when it's configured: submit
+        # a real market BUY, use the actual fill price, and rest the −12% hard stop
+        # on fill. ASX names — and everything when the broker is disabled — keep
+        # the simulator's poll-fill exactly as before (broker="sim").
+        broker_fill = None
+        if market == "US":
+            broker_fill = broker_execution.open_position(ticker, quantity, opp_id)
+        if broker_fill:
+            entry_price_usd = round(broker_fill["fill_price_usd"], 4)
+            entry_price_aud = round(entry_price_usd / fx_rate, 4)
+            quantity = broker_fill["filled_qty"]
+
         pos = {
             "opportunity_id": opp_id,
             "ticker": ticker,
@@ -477,6 +490,9 @@ def run_entries(week_of: str | None = None) -> None:
             "entry_week_of": week_of,
             "score_at_entry": score,
             "status": "open",
+            "broker": "alpaca" if broker_fill else "sim",
+            "broker_order_id": broker_fill["broker_order_id"] if broker_fill else None,
+            "broker_exit_order_id": broker_fill["broker_exit_order_id"] if broker_fill else None,
         }
 
         insert_paper_position(pos)

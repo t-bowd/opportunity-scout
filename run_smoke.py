@@ -61,6 +61,10 @@ def _imports():
     import paper_trader.manual_close # noqa: F401
     import digest.weekly_report      # noqa: F401
     import db.client                 # noqa: F401
+    import broker.config             # noqa: F401
+    import broker.alpaca             # noqa: F401
+    import broker.execution          # noqa: F401
+    import broker.reconcile          # noqa: F401
 
 
 check("all library modules import", _imports)
@@ -113,6 +117,27 @@ check("entry._target_position_size tiers",
       lambda: [entry._target_position_size(s) for s in (13, 16, 18)])
 check("exit._pnl_to_grade",
       lambda: [pexit._pnl_to_grade(p) for p in (-20, -5, 0, 5, 20)])
+
+# --- 4. Broker layer: pure logic + fail-soft when disabled ---------------------
+from broker import config as bcfg, alpaca as balpaca, execution as bexec, reconcile as brecon
+
+def _check_broker_reason_map():
+    r = brecon._exit_reason_for_order
+    assert r({"type": "trailing_stop"}) == ("trailing_stop", "closed_trail")
+    assert r({"type": "stop"}) == ("stop_loss", "closed_stop")
+    assert r({"type": "market"}) == ("time_exit", "closed_time")  # only ever a time exit
+check("broker.reconcile._exit_reason_for_order maps all order types", _check_broker_reason_map)
+
+def _check_broker_fail_soft():
+    # Smoke env has no ALPACA_* keys, so the broker must be fully disabled and
+    # every entry point a safe no-op — this is what keeps the book on the
+    # simulator until real keys are configured.
+    assert bcfg.enabled() is False
+    assert balpaca.client() is None
+    assert bexec.open_position("AAPL", 5, "opp-1") is None
+    assert bexec.arm_trailing({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
+    assert bexec.time_exit({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
+check("broker disabled without keys — all ops no-op", _check_broker_fail_soft)
 
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")

@@ -9,6 +9,7 @@ from analyzer import classify, score
 from paper_trader import entry as paper_entry
 from paper_trader import exit as paper_exit
 from paper_trader import snapshot as paper_snapshot
+from broker import reconcile as broker_reconcile
 
 print("=== Daily collection run ===")
 
@@ -21,6 +22,9 @@ classify.run()
 
 print("\n=== Scoring opportunities ===")
 score.score_week()
+
+print("\n=== Broker — reconcile fills ===")
+broker_reconcile.run()
 
 print("\n=== Paper trading — exits ===")
 paper_exit.run_exits()

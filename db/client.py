@@ -298,6 +298,15 @@ def update_paper_position_peak(
     }).eq("id", position_id).execute()
 
 
+def update_paper_position_broker_exit(position_id: str, exit_order_id: str) -> None:
+    """Point a broker-managed position at its current resting exit order (the
+    hard stop, then the trailing stop, then a market time-exit sell)."""
+    db = get_client()
+    db.table("paper_positions").update({
+        "broker_exit_order_id": exit_order_id,
+    }).eq("id", position_id).execute()
+
+
 def auto_fill_feedback_entry(opportunity_id: str, entry_price_aud: float) -> None:
     """When paper trading enters a position, mark the feedback row as acted."""
     db = get_client()

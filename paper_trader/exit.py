@@ -27,9 +27,11 @@ from db.client import (
     get_open_paper_positions,
     close_paper_position,
     update_paper_position_peak,
+    update_paper_position_broker_exit,
     auto_fill_feedback_exit,
 )
 from paper_trader.notify import notify_closed
+from broker import execution as broker_execution, config as broker_config
 
 TRAILING_STOP_ACTIVATE_PCT = 20.0   # arm the trailing stop once the position has gained 20%
 TRAILING_STOP_TRAIL_PCT    = 8.0    # then exit if price falls 8% below the running peak. Tightened
@@ -159,6 +161,37 @@ def run_exits() -> None:
                     f"peak +{peak_gain_pct:.1f}%, peak ${new_peak:.2f} AUD, "
                     f"stop at ${new_peak * (1 - TRAILING_STOP_TRAIL_PCT / 100):.2f} AUD"
                 )
+
+        # --- Broker-managed positions: Alpaca owns the stops ---
+        # For US positions executing through Alpaca, the trailing stop and the
+        # −12% hard stop are resting exchange orders that fill INTRADAY; those
+        # closes come back via broker/reconcile, not this poll. Here we only
+        # (a) swap the resting hard stop for a trailing stop when the position
+        # arms, and (b) submit a market sell for a calendar time-exit (no native
+        # order for that). Everything else just reports. If the broker is somehow
+        # disabled while a position is still tagged 'alpaca', we fall through to
+        # the simulator logic below so the position is never left unmanaged.
+        if pos.get("broker") == "alpaca" and broker_config.enabled():
+            max_hold = MAX_HOLD_DAYS_BY_PATTERN.get(pos.get("pattern", ""), DEFAULT_MAX_HOLD_DAYS)
+            if trailing_active and not was_active:
+                new_exit_id = broker_execution.arm_trailing(pos)
+                if new_exit_id:
+                    update_paper_position_broker_exit(pos["id"], new_exit_id)
+            elif days_held >= max_hold and not trailing_active:
+                sell_id = broker_execution.time_exit(pos)
+                if sell_id:
+                    update_paper_position_broker_exit(pos["id"], sell_id)
+                    print(f"[paper/exit] {ticker} — time exit sent to broker "
+                          f"(fills intraday, records on next reconcile)")
+                continue
+            armed_note = (
+                f"trailing stop live @ broker (peak +{peak_gain_pct:.1f}%)"
+                if trailing_active
+                else f"{max_hold - days_held}d to {max_hold}d time limit"
+            )
+            print(f"[paper/exit] HOLD {ticker} (broker) — "
+                  f"{days_held}d, {pnl_pct:+.1f}% (${pnl_aud:+.2f} AUD) | {armed_note}")
+            continue
 
         # --- Exit evaluation (priority order) ---
         trailing_stop_price = new_peak * (1 - TRAILING_STOP_TRAIL_PCT / 100)
