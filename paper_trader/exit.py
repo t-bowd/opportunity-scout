@@ -32,7 +32,14 @@ from db.client import (
 from paper_trader.notify import notify_closed
 
 TRAILING_STOP_ACTIVATE_PCT = 20.0   # arm the trailing stop once the position has gained 20%
-TRAILING_STOP_TRAIL_PCT    = 10.0   # then exit if price falls 10% below the running peak
+TRAILING_STOP_TRAIL_PCT    = 8.0    # then exit if price falls 8% below the running peak. Tightened
+                                    # from 10% on 2026-07-24: XMTR/GLBE both trail-closed the same
+                                    # day having peaked ~+27%/+21% but only locked +6.5%/+7.0%, so
+                                    # the wide trail gave back most of the gain. 8% captures ~+2.5pts
+                                    # more from the peak on a clean trigger, accepting slightly earlier
+                                    # exits on normal pullbacks. This is the medium-term insider/
+                                    # smart-money book, NOT the moonshot sleeve — the sleeve keeps its
+                                    # deliberately wide 20/17/15% tiers so it doesn't clip a 10x.
 
 
 def _pnl_to_grade(pnl_pct: float) -> int:
