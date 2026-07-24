@@ -128,6 +128,18 @@ def _check_broker_reason_map():
     assert r({"type": "market"}) == ("time_exit", "closed_time")  # only ever a time exit
 check("broker.reconcile._exit_reason_for_order maps all order types", _check_broker_reason_map)
 
+def _check_broker_base_url():
+    # Alpaca's dashboard shows the endpoint WITH /v2; the client appends /v2
+    # itself, so both forms (and a trailing slash) must normalise to the host.
+    want = "https://paper-api.alpaca.markets"
+    for given in (want, want + "/", want + "/v2", want + "/v2/"):
+        os.environ["ALPACA_BASE_URL"] = given
+        assert bcfg.base_url() == want, f"{given} -> {bcfg.base_url()}"
+    os.environ["ALPACA_BASE_URL"] = "https://api.alpaca.markets/v2"
+    assert bcfg.is_live() is True          # live host still detected after strip
+    os.environ.pop("ALPACA_BASE_URL")
+check("broker.config.base_url normalises /v2 + trailing slash", _check_broker_base_url)
+
 def _check_broker_fail_soft():
     # Smoke env has no ALPACA_* keys, so the broker must be fully disabled and
     # every entry point a safe no-op — this is what keeps the book on the

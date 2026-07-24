@@ -27,7 +27,15 @@ def secret_key() -> str | None:
 
 
 def base_url() -> str:
-    return os.environ.get("ALPACA_BASE_URL", PAPER_BASE_URL).rstrip("/")
+    """Alpaca host WITHOUT the /v2 suffix — the client appends /v2/... itself.
+
+    Alpaca's dashboard shows the endpoint *including* /v2, so accept that form
+    too and strip it; otherwise we'd build /v2/v2/orders and 404 on everything.
+    """
+    url = os.environ.get("ALPACA_BASE_URL", PAPER_BASE_URL).strip().rstrip("/")
+    if url.endswith("/v2"):
+        url = url[: -len("/v2")]
+    return url
 
 
 def is_live() -> bool:
