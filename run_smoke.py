@@ -146,7 +146,10 @@ def _check_broker_fail_soft():
     # simulator until real keys are configured.
     assert bcfg.enabled() is False
     assert balpaca.client() is None
+    # disabled must return None (sim fallback), NOT the DEFERRED marker —
+    # entry.py distinguishes the two and skips the pick on DEFERRED.
     assert bexec.open_position("AAPL", 5, "opp-1") is None
+    assert bexec.DEFERRED.get("deferred") is True
     assert bexec.arm_trailing({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
     assert bexec.time_exit({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
 check("broker disabled without keys — all ops no-op", _check_broker_fail_soft)

@@ -50,6 +50,10 @@ class AlpacaClient:
     def get_positions(self) -> list[dict]:
         return self._request("GET", "/v2/positions") or []
 
+    def get_clock(self) -> dict:
+        """Market clock — `is_open` gates order submission (SPEC.md §5)."""
+        return self._request("GET", "/v2/clock")
+
     # --- orders ------------------------------------------------------------
     def submit_market_buy(self, symbol: str, qty: int, client_order_id: str) -> dict:
         return self._request("POST", "/v2/orders", json={

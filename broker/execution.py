@@ -35,21 +35,45 @@ def _await_fill(cli: alpaca.AlpacaClient, order_id: str) -> dict | None:
     return None
 
 
+DEFERRED = {"deferred": True}
+
+
 def open_position(ticker: str, qty: int, opportunity_id: str) -> dict | None:
     """Submit a market BUY, wait for the fill, then rest the −12% hard stop.
 
-    Returns {fill_price_usd, filled_qty, broker_order_id, broker_exit_order_id}
-    or None if the broker is disabled / the order didn't fill / anything errored.
+    Three outcomes the caller must distinguish:
+      None       -> broker DISABLED; caller falls back to the simulator.
+      DEFERRED   -> broker on but the buy can't be filled right now (market
+                    closed, or it didn't fill). Caller must SKIP the entry
+                    entirely — NOT fall back to a sim insert, or we'd end up
+                    with a queued Alpaca order and a 'sim' Supabase row for the
+                    same pick. The pick is re-evaluated on the next run.
+      dict       -> filled: {fill_price_usd, filled_qty, broker_order_id,
+                    broker_exit_order_id}
     """
     cli = alpaca.client()
     if cli is None:
         return None
+
+    # Never submit into a closed market. The scheduled daily fires mid-session,
+    # but weekend/holiday runs and manual dispatches happen — a DAY order sent
+    # then would rest and fill at the next open, behind our back.
+    try:
+        if not cli.get_clock().get("is_open"):
+            print(f"[broker] market closed — deferring {ticker} entry to the next run")
+            return DEFERRED
+    except alpaca.BrokerError as e:
+        print(f"[broker] clock check failed, deferring {ticker} (soft): {e}")
+        return DEFERRED
+
     try:
         buy = cli.submit_market_buy(ticker, qty, client_order_id=f"os-buy-{opportunity_id}")
         filled = _await_fill(cli, buy["id"])
         if filled is None:
-            print(f"[broker] {ticker} buy did not fill this run — skipping insert")
-            return None
+            # Cancel so it can't fill later behind our back, then defer.
+            cli.cancel_order(buy["id"])
+            print(f"[broker] {ticker} buy did not fill — order cancelled, entry deferred")
+            return DEFERRED
         fill_px = float(filled["filled_avg_price"])
         fill_qty = int(float(filled["filled_qty"]))
         stop_px = fill_px * (1 - config.HARD_STOP_PCT / 100)
@@ -64,8 +88,10 @@ def open_position(ticker: str, qty: int, opportunity_id: str) -> dict | None:
             "broker_exit_order_id": stop["id"],
         }
     except alpaca.BrokerError as e:
-        print(f"[broker] open_position {ticker} failed (soft): {e}")
-        return None
+        # Defer rather than fall back to a sim insert: a buy may have landed
+        # before the error, and a sim row would silently diverge from the broker.
+        print(f"[broker] open_position {ticker} failed — deferring entry (soft): {e}")
+        return DEFERRED
 
 
 def arm_trailing(position: dict) -> str | None:

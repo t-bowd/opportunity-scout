@@ -471,7 +471,14 @@ def run_entries(week_of: str | None = None) -> None:
         # the simulator's poll-fill exactly as before (broker="sim").
         broker_fill = None
         if market == "US":
-            broker_fill = broker_execution.open_position(ticker, quantity, opp_id)
+            result = broker_execution.open_position(ticker, quantity, opp_id)
+            if result is not None and result.get("deferred"):
+                # Broker is on but couldn't fill now (market closed / no fill).
+                # Skip entirely — falling back to a sim insert here would leave
+                # Supabase and the broker disagreeing about the same pick.
+                skip("broker_deferred")
+                continue
+            broker_fill = result
         if broker_fill:
             entry_price_usd = round(broker_fill["fill_price_usd"], 4)
             entry_price_aud = round(entry_price_usd / fx_rate, 4)
