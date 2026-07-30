@@ -38,6 +38,23 @@ def _await_fill(cli: alpaca.AlpacaClient, order_id: str) -> dict | None:
 DEFERRED = {"deferred": True}
 
 
+def account_cash_equity_usd() -> tuple[float, float] | None:
+    """(cash, equity) in USD from the live/paper broker account, or None when the
+    broker is disabled / unreachable. Cash is the hard deployable budget (it
+    already nets out open positions); equity backs the single-name concentration
+    cap. Fails soft — a None here makes the live sizer deploy nothing this run
+    rather than guess."""
+    cli = alpaca.client()
+    if cli is None:
+        return None
+    try:
+        a = cli.get_account()
+        return float(a["cash"]), float(a["portfolio_value"])
+    except (alpaca.BrokerError, KeyError, ValueError) as e:
+        print(f"[broker] account cash/equity fetch failed (soft): {e}")
+        return None
+
+
 def open_position(ticker: str, qty: int, opportunity_id: str) -> dict | None:
     """Submit a market BUY, wait for the fill, then rest the −12% hard stop.
 

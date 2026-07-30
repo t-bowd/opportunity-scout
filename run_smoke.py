@@ -152,7 +152,20 @@ def _check_broker_fail_soft():
     assert bexec.DEFERRED.get("deferred") is True
     assert bexec.arm_trailing({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
     assert bexec.time_exit({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
+    assert bexec.account_cash_equity_usd() is None   # no account when disabled
 check("broker disabled without keys — all ops no-op", _check_broker_fail_soft)
+
+def _check_live_sizing():
+    lts = entry._live_target_size
+    # Funded ~$854 AUD (≈$600 USD) empty book: flat base wins (cap 25%*854=213 > 200)
+    assert lts(854, 854) == 200.0
+    # Budget nearly gone: returns the remnant (< MIN_TRADE) so caller skips
+    assert lts(120, 854) == 120.0
+    # Small account: 25%-of-equity single-name cap binds below base
+    assert lts(400, 400) == 100.0
+    # Large account: still flat base, never upsizes
+    assert lts(5000, 5000) == 200.0
+check("entry._live_target_size hard-caps by cash + single-name fraction", _check_live_sizing)
 
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")

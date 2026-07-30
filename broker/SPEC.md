@@ -151,6 +151,37 @@ No new status values needed — broker fills map onto the existing
    against the fake client — no network. Integration test needs your paper keys.
 6. First live paper run; verify a resting order appears in the Alpaca dashboard.
 
+## 10a. Live (real-money) sizing — added 2026-07-31
+
+Going live is a **different book with hard rules**, gated entirely on
+`config.is_live()` (true when `ALPACA_BASE_URL` is the live host, not paper). The
+key swap flips both execution AND sizing in one action — paper behaviour is
+byte-for-byte unchanged (`live=False`). Decided with Tim (fully autonomous, but
+hard-capped; shape = the original $2k/10, ramping up as funded):
+
+- **Hard budget = the broker's actual cash** (`account_cash_equity_usd()`), not a
+  hardcoded pool. It already nets out open positions, so it **auto-ramps** as the
+  account is funded and as winners realise — no config change to grow. A broker
+  read failure ⇒ 0 budget ⇒ deploy nothing this run (never guess with real money).
+- **Equal-weight base ($200 AUD), NO conviction upsizing, NO over-budget override.**
+  The opposite of the paper soft pool — when cash can't fund another base
+  position, stop (`live_budget_exhausted`).
+- **Single-name cap** = `LIVE_MAX_SINGLE_NAME_FRAC` (25%) of account equity, so a
+  small account can't over-concentrate on one high-scored name.
+- **10 slots** (`LIVE_MAX_POSITIONS`), vs paper's 20.
+- **US-only** — ASX picks are skipped (`asx_unsupported_live`); no real-money
+  venue, and we must never fall back to a fake sim fill on a live book.
+- **Legacy paper positions are ignored** for live counting/budget — they wind down
+  in exit.py; only `broker='alpaca'` positions consume live slots.
+- Result at ~$600 USD: ~4 positions; fills more on its own as the balance grows to
+  the ~$2k/10 shape. Effective floor: below ~$600 AUD equity the 25% cap drops the
+  size under MIN_TRADE and it stops trading (account too small).
+
+**Sequencing rule (critical):** this build must be merged/pushed BEFORE the keys
+are swapped to live — otherwise the paper $5k-pool sizer would run against the
+real account. Because sizing keys off `is_live()`, the swap itself is the trigger;
+nothing else to toggle.
+
 ## 11. What we're honest about
 
 - Alpaca **paper** fills are simulated off real quotes — far better than our

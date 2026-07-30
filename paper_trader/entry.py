@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from collectors.edgar import get_sector_key
 from paper_trader.notify import notify_opened
-from broker import execution as broker_execution
+from broker import execution as broker_execution, config as broker_config
 from db.client import (
     get_recent_opportunities,
     get_open_paper_positions,
@@ -85,6 +85,18 @@ HIGH_CONVICTION_SCORE = 18      # picks at/above this may enter over the soft po
 # price bar. Such names may still enter (the trailing stop captures an IPO pop) but
 # are held to BASE size, never the upsized conviction tiers.
 MIN_HISTORY_SESSIONS = 5
+
+# --- Live (real-money) sizing profile — active ONLY when broker_config.is_live()
+# (i.e. the Alpaca base URL is the live host, not paper). Everything below is a
+# HARD limit, the opposite of the paper soft pool: the budget IS the broker's
+# actual cash (so it auto-ramps as the account is funded and as winners are
+# realised), positions are equal-weight base size with NO conviction upsizing and
+# NO over-budget override, capped so no single name exceeds a fraction of account
+# equity. US-only — ASX has no execution venue for real money. See broker/SPEC.md.
+LIVE_MAX_POSITIONS = 10
+LIVE_BASE_POSITION_AUD = 200.0
+LIVE_MAX_SINGLE_NAME_FRAC = 0.25   # never more than 25% of equity in one position
+
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
 SLIPPAGE_PCT = 0.5
@@ -234,6 +246,16 @@ def _target_position_size(score: int) -> float:
     return BASE_POSITION_AUD
 
 
+def _live_target_size(budget_aud: float, equity_aud: float) -> float:
+    """Live (real-money) trade size in AUD: equal-weight base, but never more than
+    the remaining cash budget nor LIVE_MAX_SINGLE_NAME_FRAC of account equity.
+    Returns a size < MIN_TRADE_AUD when the budget can't support another position
+    (caller then skips). No conviction upsizing — deliberately flat, so a small
+    live account can't over-concentrate on one high-scored name."""
+    single_name_cap = LIVE_MAX_SINGLE_NAME_FRAC * equity_aud
+    return min(LIVE_BASE_POSITION_AUD, budget_aud, single_name_cap)
+
+
 def _recency_ok(opp: dict) -> tuple[bool, str]:
     """True if the opportunity is fresh enough for its pattern type."""
     pattern = opp.get("pattern", "")
@@ -264,16 +286,43 @@ def run_entries(week_of: str | None = None) -> None:
     # Friday-scored opportunity is still actionable on Monday. Per-pattern
     # recency windows below still gate how fresh each individual pick must be.
     opportunities = get_recent_opportunities(days=10, limit=25)
-    open_positions = get_open_paper_positions()
+    fx_rate = _fetch_fx_rate()
+
+    # LIVE vs PAPER. Live (the Alpaca base URL points at the real host) is a
+    # different book with hard, real-money rules; paper is unchanged. In live mode
+    # we consider ONLY broker-managed (Alpaca) positions — any legacy paper
+    # positions are winding down separately in exit.py and must not consume live
+    # slots or budget.
+    live = broker_config.is_live()
+    all_open = get_open_paper_positions()
+    open_positions = [p for p in all_open if p.get("broker") == "alpaca"] if live else all_open
     open_count = len(open_positions)
     open_tickers = {p["ticker"] for p in open_positions}
+    max_positions = LIVE_MAX_POSITIONS if live else MAX_POSITIONS
 
-    # Budget = the $5,000 pool minus what's already deployed in open positions.
-    deployed = sum(
-        float(p["entry_price_aud"]) * p["quantity"] + float(p.get("brokerage_aud", 0))
-        for p in open_positions
-    )
-    remaining_budget = TOTAL_POOL_AUD - deployed
+    # Budget. Paper: the $5,000 SOFT pool minus what's deployed. Live: the broker's
+    # actual CASH (a HARD cap that already nets out open positions, so it ramps up
+    # on its own as the account is funded / winners realise). equity backs the
+    # single-name cap. A broker read failure yields 0 budget → deploy nothing this
+    # run rather than guess with real money.
+    live_equity_aud = 0.0
+    if live:
+        snap = broker_execution.account_cash_equity_usd()
+        if snap is None:
+            remaining_budget = 0.0
+            print("[paper/entry] LIVE: broker account unreadable — deploying nothing this run")
+        else:
+            cash_usd, equity_usd = snap
+            remaining_budget = round(cash_usd / fx_rate, 2)
+            live_equity_aud = round(equity_usd / fx_rate, 2)
+            print(f"[paper/entry] LIVE real-money book — hard budget ${remaining_budget:.0f} AUD "
+                  f"cash / ${live_equity_aud:.0f} AUD equity, {open_count}/{max_positions} positions")
+    else:
+        deployed = sum(
+            float(p["entry_price_aud"]) * p["quantity"] + float(p.get("brokerage_aud", 0))
+            for p in open_positions
+        )
+        remaining_budget = TOTAL_POOL_AUD - deployed
 
     # Sector counts across open positions (for the diversification cap)
     open_sectors: Counter = Counter()
@@ -287,17 +336,15 @@ def run_entries(week_of: str | None = None) -> None:
     # REVIEW line, so a compelling pick can be assessed by hand (manual_open.py)
     # instead of silently passing by while the book is full. Auto-entry resumes on
     # its own as soon as a close frees a slot — no flag to remember to flip back.
-    review_only = open_count >= MAX_POSITIONS
+    review_only = open_count >= max_positions
     if review_only:
-        print(f"[paper/entry] {open_count}/{MAX_POSITIONS} positions — at max, "
+        print(f"[paper/entry] {open_count}/{max_positions} positions — at max, "
               f"REVIEW ONLY: no auto-entry, qualifying picks listed for manual assessment")
-    if remaining_budget < MIN_TRADE_AUD:
+    if not live and remaining_budget < MIN_TRADE_AUD:
         # Soft pool is full — don't stop. High-conviction picks (score >=
         # HIGH_CONVICTION_SCORE) may still enter over the pool; marginal ones skip.
         print(f"[paper/entry] soft pool full (${remaining_budget:.0f} of ${TOTAL_POOL_AUD:.0f} left) "
               f"— only score >={HIGH_CONVICTION_SCORE} picks may go over")
-
-    fx_rate = _fetch_fx_rate()
 
     # Market regime — compute once per run for each market
     bearish_us = _market_is_bearish(is_asx=False)
@@ -326,6 +373,12 @@ def run_entries(week_of: str | None = None) -> None:
             })
             print(f"[paper/entry] SKIP {ticker} (score {score}) — {reason}")
 
+        # 0. Live real-money book is US-only — ASX has no execution venue, so never
+        # open one with real money (it would fall back to a fake sim fill).
+        if live and is_asx:
+            skip("asx_unsupported_live")
+            continue
+
         # 1. Score gate (regime-aware)
         bearish = bearish_asx if is_asx else bearish_us
         min_score = BEARISH_MIN_SCORE if bearish else MIN_SCORE
@@ -335,7 +388,7 @@ def run_entries(week_of: str | None = None) -> None:
 
         # 2. Position cap — in review mode we are at the ceiling by definition, so
         # keep evaluating candidates instead of breaking out with nothing to show.
-        if open_count >= MAX_POSITIONS and not review_only:
+        if open_count >= max_positions and not review_only:
             skip("max_positions_reached")
             break
 
@@ -428,24 +481,35 @@ def run_entries(week_of: str | None = None) -> None:
         # (score >= HIGH_CONVICTION_SCORE) may enter, sized at full conviction and
         # deliberately over the pool; marginal picks skip. MAX_POSITIONS (checked
         # above) is the hard ceiling either way.
-        conviction_size = _target_position_size(score)
-        # Young-name guard: a fresh IPO/new listing (< MIN_HISTORY_SESSIONS of price
-        # history) can't have its conviction validated — a day-1 score may be inflated
-        # on a single bar (LIME hit 20/20 on day one, then re-scored to 15 once it had
-        # some history). Still enter it — the trailing stop captures an IPO pop — but
-        # only at BASE size, never the upsized conviction tiers.
-        if (n_sessions is not None and n_sessions < MIN_HISTORY_SESSIONS
-                and conviction_size > BASE_POSITION_AUD):
-            print(f"[paper/entry] {ticker} only {n_sessions} session(s) of history "
-                  f"— capping to base size (no conviction upsizing)")
-            conviction_size = BASE_POSITION_AUD
-        if remaining_budget >= MIN_TRADE_AUD:
-            target_aud = min(conviction_size, remaining_budget)
-        elif score >= HIGH_CONVICTION_SCORE:
-            target_aud = conviction_size  # high conviction — go over the soft pool
+        if live:
+            # Live real money: flat equal-weight base, hard-capped by remaining cash
+            # and the single-name equity fraction. No conviction upsizing, no
+            # over-budget override — when the cash can't fund another base position
+            # we simply stop. (No young-name upsizing to guard against here — size
+            # is already flat.)
+            target_aud = _live_target_size(remaining_budget, live_equity_aud)
+            if target_aud < MIN_TRADE_AUD:
+                skip("live_budget_exhausted")
+                continue
         else:
-            skip("soft_pool_full")
-            continue
+            conviction_size = _target_position_size(score)
+            # Young-name guard: a fresh IPO/new listing (< MIN_HISTORY_SESSIONS of price
+            # history) can't have its conviction validated — a day-1 score may be inflated
+            # on a single bar (LIME hit 20/20 on day one, then re-scored to 15 once it had
+            # some history). Still enter it — the trailing stop captures an IPO pop — but
+            # only at BASE size, never the upsized conviction tiers.
+            if (n_sessions is not None and n_sessions < MIN_HISTORY_SESSIONS
+                    and conviction_size > BASE_POSITION_AUD):
+                print(f"[paper/entry] {ticker} only {n_sessions} session(s) of history "
+                      f"— capping to base size (no conviction upsizing)")
+                conviction_size = BASE_POSITION_AUD
+            if remaining_budget >= MIN_TRADE_AUD:
+                target_aud = min(conviction_size, remaining_budget)
+            elif score >= HIGH_CONVICTION_SCORE:
+                target_aud = conviction_size  # high conviction — go over the soft pool
+            else:
+                skip("soft_pool_full")
+                continue
         quantity = int(target_aud / entry_price_aud)
         if quantity < 1:
             skip(f"price_too_high_aud:{entry_price_aud:.2f}")
@@ -527,8 +591,9 @@ def run_entries(week_of: str | None = None) -> None:
                       opp.get("pattern", "unknown"), opp.get("plain_english", ""))
 
     review_note = f", {reviewed} awaiting manual review" if review_only else ""
-    print(
-        f"[paper/entry] done — {entered} entered{review_note}, "
-        f"{open_count}/{MAX_POSITIONS} open, "
-        f"${TOTAL_POOL_AUD - remaining_budget:.0f}/${TOTAL_POOL_AUD:.0f} deployed"
-    )
+    if live:
+        book_note = f"{open_count}/{max_positions} live, ${remaining_budget:.0f} AUD cash left"
+    else:
+        book_note = (f"{open_count}/{max_positions} open, "
+                     f"${TOTAL_POOL_AUD - remaining_budget:.0f}/${TOTAL_POOL_AUD:.0f} deployed")
+    print(f"[paper/entry] done — {entered} entered{review_note}, {book_note}")
