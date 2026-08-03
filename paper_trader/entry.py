@@ -96,6 +96,12 @@ MIN_HISTORY_SESSIONS = 5
 LIVE_MAX_POSITIONS = 10
 LIVE_BASE_POSITION_AUD = 200.0
 LIVE_MAX_SINGLE_NAME_FRAC = 0.25   # never more than 25% of equity in one position
+# Real money gets a higher bar than paper's exploratory MIN_SCORE=13. The 30d
+# study (analysis-baseline-2026-07-27) showed the 13-14 bucket was a coin-flip
+# (+0.5%, 47% win) and smart_money picks averaged -3.3% — the profile that filled
+# the first live book when the top pick went stale over a weekend. 15 excludes the
+# 13-14 bucket while keeping enough names to fill a small book.
+LIVE_MIN_SCORE = 15
 
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
@@ -379,11 +385,19 @@ def run_entries(week_of: str | None = None) -> None:
             skip("asx_unsupported_live")
             continue
 
-        # 1. Score gate (regime-aware)
+        # 1. Score gate (regime-aware). Live real money gets a higher floor than
+        # paper — never below LIVE_MIN_SCORE regardless of regime.
         bearish = bearish_asx if is_asx else bearish_us
         min_score = BEARISH_MIN_SCORE if bearish else MIN_SCORE
+        if live:
+            min_score = max(min_score, LIVE_MIN_SCORE)
         if score < min_score:
-            skip(f"score_{score}_below_{min_score}{'_bearish_regime' if bearish else ''}")
+            gate = f"score_{score}_below_{min_score}"
+            if live and not bearish:
+                gate += "_live"
+            elif bearish:
+                gate += "_bearish_regime"
+            skip(gate)
             continue
 
         # 2. Position cap — in review mode we are at the ceiling by definition, so

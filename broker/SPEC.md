@@ -169,6 +169,11 @@ hard-capped; shape = the original $2k/10, ramping up as funded):
 - **Single-name cap** = `LIVE_MAX_SINGLE_NAME_FRAC` (25%) of account equity, so a
   small account can't over-concentrate on one high-scored name.
 - **10 slots** (`LIVE_MAX_POSITIONS`), vs paper's 20.
+- **Higher score gate** (`LIVE_MIN_SCORE` = 15, vs paper's MIN_SCORE 13). Added
+  2026-08-03 after the first live book took a score-13 smart_money name (CVNA)
+  when the top pick (KRNY 19) went stale over a weekend — the 30d study flagged
+  the 13-14 bucket (47% win) and smart_money (-3.3%) as the weakest profiles.
+  Real money shouldn't fund them on a 4-5 position book.
 - **US-only** — ASX picks are skipped (`asx_unsupported_live`); no real-money
   venue, and we must never fall back to a fake sim fill on a live book.
 - **Legacy paper positions are ignored** for live counting/budget — they wind down
