@@ -41,20 +41,22 @@ def _close_on_or_before(hist: list[tuple[date, float]], target: date) -> float |
     return hist[i][1] if i >= 0 else None
 
 
-def _spy_benchmark(open_pos: list[dict], fx_rate: float) -> str | None:
+def _book_vs_spy(open_pos: list[dict], fx_rate: float,
+                 spy_hist=None, audusd_hist=None, spy_now=None) -> tuple[float, float] | None:
     """
-    Capital-weighted "vs market" line for the OPEN book: the book's mark-to-market
-    AUD return against an AUD investor who'd instead bought SPY on each position's
-    own entry date. FX is applied to the SPY leg too (AUD->USD in, USD->AUD out),
-    so US names and their SPY counterfactual carry the same currency move and the
-    comparison is apples-to-apples. Returns a printable line, or None if data is
-    thin.
+    Capital-weighted "vs market" read for a set of open positions: their
+    mark-to-market AUD return, and the return an AUD investor would have made
+    buying SPY on each position's own entry date instead. FX is applied to the SPY
+    leg too (AUD->USD in, USD->AUD out), so US names and their SPY counterfactual
+    carry the same currency move and the comparison is apples-to-apples. Returns
+    (book_pct, spy_pct) or None if data is thin. SPY/FX history can be passed in to
+    avoid refetching when scoring several sub-books in one run.
     """
     if not open_pos:
         return None
-    spy_hist = _daily_closes("SPY")
-    audusd_hist = _daily_closes("AUDUSD=X")
-    spy_now = _fetch_price("SPY")
+    spy_hist = spy_hist if spy_hist is not None else _daily_closes("SPY")
+    audusd_hist = audusd_hist if audusd_hist is not None else _daily_closes("AUDUSD=X")
+    spy_now = spy_now if spy_now is not None else _fetch_price("SPY")
     if not spy_hist or not spy_now or not fx_rate:
         return None
 
@@ -87,8 +89,12 @@ def _spy_benchmark(open_pos: list[dict], fx_rate: float) -> str | None:
         return None
     book_pct = (value_sum / cost_sum - 1) * 100
     spy_pct = (spy_value_sum / cost_sum - 1) * 100
-    return (f"[paper/snapshot] open book {book_pct:+.1f}% vs SPY {spy_pct:+.1f}% "
-            f"(same entries, AUD) -> alpha {book_pct - spy_pct:+.1f}%")
+    return book_pct, spy_pct
+
+
+def _deployed_aud(positions: list[dict]) -> float:
+    return sum(float(p["entry_price_aud"]) * p["quantity"] + float(p.get("brokerage_aud", 0))
+               for p in positions)
 
 
 def run_snapshot() -> None:
@@ -139,7 +145,34 @@ def run_snapshot() -> None:
         f"{trades_needed} trades until graduation review"
     )
 
-    # Portfolio-level "vs market" read for the open book (mark-to-market).
-    bench = _spy_benchmark(open_pos, _fetch_fx_rate())
-    if bench:
-        print(bench)
+    # Portfolio-level "vs market" read. Once real money is live, split the open
+    # book into LIVE (Alpaca, broker='alpaca') and PAPER (the legacy sim book
+    # winding down) so the real-money performance isn't buried in the legacy
+    # figure. Before cutover (no live positions) keep the single combined line.
+    fx = _fetch_fx_rate()
+    spy_hist = _daily_closes("SPY")
+    audusd_hist = _daily_closes("AUDUSD=X")
+    spy_now = _fetch_price("SPY")
+
+    def _print_book(label: str, positions: list[dict]) -> None:
+        if not positions:
+            return
+        line = f"[paper/snapshot] {label}: {len(positions)} open, ${_deployed_aud(positions):.0f} deployed"
+        bench = _book_vs_spy(positions, fx, spy_hist, audusd_hist, spy_now)
+        if bench:
+            book_pct, spy_pct = bench
+            line += f", {book_pct:+.1f}% vs SPY {spy_pct:+.1f}% -> alpha {book_pct - spy_pct:+.1f}%"
+        print(line)
+
+    live_pos = [p for p in open_pos if p.get("broker") == "alpaca"]
+    paper_pos = [p for p in open_pos if p.get("broker") != "alpaca"]
+    if live_pos:
+        _print_book("LIVE (real money)", live_pos)
+        _print_book("PAPER (winding down)", paper_pos)
+    else:
+        # No real money yet — unchanged single "open book" line.
+        bench = _book_vs_spy(open_pos, fx, spy_hist, audusd_hist, spy_now)
+        if bench:
+            book_pct, spy_pct = bench
+            print(f"[paper/snapshot] open book {book_pct:+.1f}% vs SPY {spy_pct:+.1f}% "
+                  f"(same entries, AUD) -> alpha {book_pct - spy_pct:+.1f}%")
