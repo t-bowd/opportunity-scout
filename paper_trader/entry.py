@@ -262,20 +262,41 @@ def _live_target_size(budget_aud: float, equity_aud: float) -> float:
     return min(LIVE_BASE_POSITION_AUD, budget_aud, single_name_cap)
 
 
+def _business_days_between(start: date, end: date) -> int:
+    """Weekdays (Mon–Fri) strictly after `start` up to and including `end`.
+
+    The recency window counts TRADING days, not calendar days, so a signal isn't
+    burned by days the market was shut — a Friday-scored pick is still fresh on
+    Monday (it was stale-by-the-weekend before: KRNY scored Tue, 6 calendar days
+    by the next Monday > its 5-day window, though only 4 were trading days).
+    Market holidays aren't excluded — weekends are the dominant case and a holiday
+    clips a window by at most a day.
+    """
+    if end <= start:
+        return 0
+    days = 0
+    d = start + timedelta(days=1)
+    while d <= end:
+        if d.weekday() < 5:  # Mon–Fri
+            days += 1
+        d += timedelta(days=1)
+    return days
+
+
 def _recency_ok(opp: dict) -> tuple[bool, str]:
-    """True if the opportunity is fresh enough for its pattern type."""
+    """True if the opportunity is fresh enough for its pattern type — measured in
+    trading days, so weekends/market closures don't consume the window."""
     pattern = opp.get("pattern", "")
     window = RECENCY_WINDOWS.get(pattern, DEFAULT_RECENCY)
-    cutoff = date.today() - timedelta(days=window)
     created_str = opp.get("created_at", "")
     if not created_str:
         return True, ""
     try:
         scored_on = date.fromisoformat(created_str[:10])
-        if scored_on < cutoff:
-            return False, f"stale:{pattern}_window_{window}d_scored_{scored_on}"
     except Exception:
-        pass
+        return True, ""
+    if _business_days_between(scored_on, date.today()) > window:
+        return False, f"stale:{pattern}_window_{window}bd_scored_{scored_on}"
     return True, ""
 
 

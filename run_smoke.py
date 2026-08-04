@@ -167,6 +167,17 @@ def _check_live_sizing():
     assert lts(5000, 5000) == 200.0
 check("entry._live_target_size hard-caps by cash + single-name fraction", _check_live_sizing)
 
+def _check_business_days():
+    from datetime import date
+    bd = entry._business_days_between
+    assert bd(date(2026, 8, 3), date(2026, 8, 7)) == 4     # Mon->Fri, no weekend
+    assert bd(date(2026, 7, 31), date(2026, 8, 3)) == 1    # Fri->Mon: weekend free
+    assert bd(date(2026, 7, 28), date(2026, 8, 3)) == 4    # KRNY: Tue->next Mon (was 6 cal)
+    assert bd(date(2026, 7, 28), date(2026, 8, 5)) == 6    # ...Wed = stale at window 5
+    assert bd(date(2026, 8, 4), date(2026, 8, 4)) == 0     # same day
+    assert bd(date(2026, 8, 5), date(2026, 8, 4)) == 0     # end before start
+check("entry._business_days_between ignores weekends (KRNY fix)", _check_business_days)
+
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")
     raise SystemExit(1)
