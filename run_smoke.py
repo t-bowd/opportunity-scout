@@ -178,6 +178,25 @@ def _check_business_days():
     assert bd(date(2026, 8, 5), date(2026, 8, 4)) == 0     # end before start
 check("entry._business_days_between ignores weekends (KRNY fix)", _check_business_days)
 
+# --- 5. Small-cap sleeve: pure momentum note + fail-soft capture no-op ----------
+from smallcap import exit as sc_exit, store as sc_store
+
+def _check_sleeve_climbing_note():
+    # _climbing_note is now pure (takes the already-fetched verdict), so the
+    # momentum fetch happens once per position and the string can be smoke-tested.
+    cn = sc_exit._climbing_note
+    assert cn(None) == " | climbing n/a"                                   # data unavailable
+    assert cn({"climbing": True, "ret_20d": 8.0}) == " | climbing"
+    assert cn({"climbing": False, "ret_20d": -4.2}) == " | NOT climbing (20d -4%)"
+    assert sc_exit._safe_momentum("___nope___") is None                    # never raises
+check("smallcap.exit._climbing_note pure + _safe_momentum fail-soft", _check_sleeve_climbing_note)
+
+def _check_sleeve_momentum_noop():
+    # Empty batch must be a no-op that never opens a DB connection (the exit run
+    # calls this every day even when there are no observations to write).
+    sc_store.record_momentum([])
+check("smallcap.store.record_momentum([]) is a no-op", _check_sleeve_momentum_noop)
+
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")
     raise SystemExit(1)

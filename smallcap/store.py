@@ -53,3 +53,15 @@ def insert_skipped(skip: dict) -> None:
 def upsert_snapshot(snap: dict) -> None:
     db = get_client()
     db.table("smallcap_snapshots").upsert(snap, on_conflict="snapshot_date").execute()
+
+
+def record_momentum(rows: list[dict]) -> None:
+    """
+    Persist per-position daily momentum observations (see smallcap_momentum in
+    schema.sql). Upsert on (position_id, obs_date) so a same-day re-run overwrites
+    rather than duplicating. No-op on an empty list.
+    """
+    if not rows:
+        return
+    db = get_client()
+    db.table("smallcap_momentum").upsert(rows, on_conflict="position_id,obs_date").execute()

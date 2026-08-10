@@ -131,7 +131,15 @@ def _parse_date(s) -> date:
     return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
 
 
-def _climbing_note(ticker: str) -> str:
+def _safe_momentum(ticker: str) -> dict | None:
+    """momentum() but never raises — instrumentation must not break the exit run."""
+    try:
+        return momentum(ticker)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _climbing_note(m: dict | None) -> str:
     """
     OBSERVATION ONLY — deliberately never influences an exit decision.
 
@@ -139,17 +147,14 @@ def _climbing_note(ticker: str) -> str:
     momentum breaks the thesis has arguably gone, but price alone may not have
     tripped anything: JSPR (2026-07-20) peaked +25%, fell off the screen's
     climbing list, yet sat far from the -35% disaster stop and months from its
-    readout. Logging the verdict next to each HOLD builds the record needed to
-    judge, at the 4-6 week review, whether a momentum-invalidation exit earns a
-    place — rather than narrowing the trail, which would clip the power-law
-    winners the sleeve exists to catch.
+    readout. Logging the verdict next to each HOLD — and persisting it via
+    smallcap_momentum — builds the record needed to judge, at the 4-6 week review,
+    whether a momentum-invalidation exit earns a place, rather than narrowing the
+    trail, which would clip the power-law winners the sleeve exists to catch.
 
-    Fails soft to "" so a data hiccup can never break the exit run.
+    Pure (takes the already-fetched verdict) so it can be smoke-tested. `m` is None
+    when momentum data was unavailable.
     """
-    try:
-        m = momentum(ticker)
-    except Exception:  # noqa: BLE001 — instrumentation must not break exits
-        return ""
     if not m:
         return " | climbing n/a"
     return (" | climbing" if m["climbing"]
@@ -165,6 +170,7 @@ def run_exits() -> None:
         return
 
     fx_note = ""
+    momentum_rows: list[dict] = []   # per-position daily observations to persist
     for pos in positions:
         tkr = pos["ticker"]
         price_native = current_price_native(tkr)
@@ -174,6 +180,20 @@ def run_exits() -> None:
         price_aud = to_aud(price_native, pos["exchange"], float(pos.get("fx_rate") or 0.65))
         d = evaluate(pos, price_aud, today)
         held = (today - _parse_date(pos["entry_date"])).days
+
+        # Momentum verdict — fetched once, used for both the printed note and the
+        # persisted record. Observation only; never feeds the exit decision above.
+        m = _safe_momentum(tkr)
+        entry = float(pos["entry_price_aud"])
+        momentum_rows.append({
+            "position_id": pos["id"],
+            "ticker": tkr,
+            "obs_date": today.isoformat(),
+            "climbing": m["climbing"] if m else None,
+            "ret_20d": m["ret_20d"] if m else None,
+            "pnl_pct": d["pnl_pct"],
+            "peak_gain_pct": round((d["new_peak_aud"] - entry) / entry * 100, 1) if entry else None,
+        })
 
         if d["action"] == "exit":
             qty = pos["quantity"]
@@ -193,5 +213,14 @@ def run_exits() -> None:
             arm = " | trail armed" if d["trail_active"] else ""
             cat = pos.get("catalyst_date") or "no date"
             print(f"[smallcap/exit] HOLD {tkr} — {held}d, {d['pnl_pct']:+.1f}% "
-                  f"(catalyst {cat}){arm}{_climbing_note(tkr)}")
+                  f"(catalyst {cat}){arm}{_climbing_note(m)}")
+
+    # Persist the day's momentum observations in one batch. Best-effort: a DB
+    # hiccup here must never crash the exit run (mirrors the main book's
+    # feedback-capture pattern) — the exits above have already been committed.
+    try:
+        store.record_momentum(momentum_rows)
+    except Exception as e:  # noqa: BLE001 — capture is instrumentation, not critical
+        print(f"[smallcap/exit] momentum capture failed (non-fatal): {e}")
+
     print(fx_note, end="")

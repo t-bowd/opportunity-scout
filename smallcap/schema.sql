@@ -48,3 +48,24 @@ create table if not exists smallcap_snapshots (
     win_rate            numeric,
     created_at          timestamptz default now()
 );
+
+-- Per-position daily momentum observations. The exit run already computes the
+-- "climbing / NOT climbing" verdict per open position each day but only prints
+-- it — this persists it so the 4-6 week review can test a momentum-invalidation
+-- exit: it needs to know WHEN a name stopped climbing relative to its peak, not
+-- just where it peaked. One row per open position per run; the unique
+-- (position_id, obs_date) makes a same-day re-run idempotent. Instrumentation
+-- only — nothing here feeds an exit decision.
+create table if not exists smallcap_momentum (
+    id             uuid primary key default gen_random_uuid(),
+    position_id    uuid not null references smallcap_positions(id) on delete cascade,
+    ticker         text not null,
+    obs_date       date not null,
+    climbing       boolean,        -- null if price/momentum data was unavailable that day
+    ret_20d        numeric,        -- 20-session % return (the momentum measure)
+    pnl_pct        numeric,        -- position P&L% that day, for peak/fade context
+    peak_gain_pct  numeric,        -- gain of the running peak vs entry, that day
+    created_at     timestamptz default now(),
+    unique (position_id, obs_date)
+);
+create index if not exists smallcap_momentum_position_idx on smallcap_momentum (position_id);
