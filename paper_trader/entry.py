@@ -406,6 +406,20 @@ def run_entries(week_of: str | None = None) -> None:
             skip("asx_unsupported_live")
             continue
 
+        # 0b. Live real-money book blocks standalone smart_money (13F) entries.
+        # Our own forward-return data (analysis.yml, two windows) shows 13F picks
+        # lose on average — ~-4.5% at 30d, <50% win — while insider_buy gains
+        # (~+3.8%, ~64% win). A 13F disclosure is up to 45 days stale, so the move
+        # is often over by the time it is public. We keep SCORING and measuring
+        # smart_money (the feedback table still records its 30/90d returns whether
+        # or not we enter it), but decline to spend REAL money on the one pattern
+        # the data says loses — a freed live slot always has an insider_buy
+        # alternative waiting in the queue. Paper book (winding down) is
+        # unaffected; the Gemini scoring prompt is untouched.
+        if live and opp.get("pattern", "") == "smart_money":
+            skip("smart_money_blocked_live")
+            continue
+
         # 1. Score gate (regime-aware). Live real money gets a higher floor than
         # paper — never below LIVE_MIN_SCORE regardless of regime.
         bearish = bearish_asx if is_asx else bearish_us

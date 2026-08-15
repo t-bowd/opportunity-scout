@@ -176,6 +176,16 @@ hard-capped; shape = the original $2k/10, ramping up as funded):
   Real money shouldn't fund them on a 4-5 position book.
 - **US-only** — ASX picks are skipped (`asx_unsupported_live`); no real-money
   venue, and we must never fall back to a fake sim fill on a live book.
+- **No standalone smart_money** — 13F picks are skipped on the live book
+  (`smart_money_blocked_live`). Added 2026-08-15 after three matured 30d analysis
+  windows agreed the pattern loses: smart_money -3.3% → -4.5% → -4.4% (n=23, 39%
+  win) vs insider_buy +4.8% → +3.8% → +4.2% (64% win). A 13F disclosure is up to
+  45 days stale, so the edge is usually gone by the time it is public. We still
+  SCORE and MEASURE smart_money (the feedback table records its 30/90d returns
+  whether or not we enter), so we keep learning about it — we just decline to
+  spend real money on it, and a freed slot always has an insider_buy alternative
+  queued. The Gemini scoring prompt is deliberately untouched (Tim's call: it
+  works well; gate at the entry, not in scoring). Paper book unaffected.
 - **Legacy paper positions are ignored** for live counting/budget — they wind down
   in exit.py; only `broker='alpaca'` positions consume live slots.
 - Result at ~$600 USD: ~4 positions; fills more on its own as the balance grows to
