@@ -103,6 +103,15 @@ LIVE_MAX_SINGLE_NAME_FRAC = 0.25   # never more than 25% of equity in one positi
 # 13-14 bucket while keeping enough names to fill a small book.
 LIVE_MIN_SCORE = 15
 
+# MANUAL SAFETY HOLD (2026-08-21): a duplicate $681.30 cash deposit posted to the
+# Alpaca account (Aug 19 AND Aug 20) — source unconfirmed (possible instant-deposit
+# double-credit that could reverse, or a genuine duplicate bank transfer). Until
+# that is reconciled with the bank/Alpaca, place NO new real-money entries so we
+# never deploy cash that might vanish. This gates LIVE entries ONLY — reconcile,
+# exits, and resting stops all keep running, so the existing 10 positions stay
+# fully managed. Set back to False to resume live entries once the cash is cleared.
+LIVE_ENTRIES_PAUSED = True
+
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
 SLIPPAGE_PCT = 0.5
@@ -384,7 +393,20 @@ def run_entries(week_of: str | None = None) -> None:
     entered = 0
     reviewed = 0   # candidates surfaced for manual assessment (review mode only)
 
+    # Manual real-money safety hold. When live entries are paused we still fall
+    # through the loop (so REVIEW/skip diagnostics print as usual) but no live
+    # pick is ever allowed to place an order — see the guard at the top of the loop.
+    live_paused = live and LIVE_ENTRIES_PAUSED
+    if live_paused:
+        print("[paper/entry] ⛔ LIVE ENTRIES PAUSED (manual safety hold) — no real-money "
+              "entries this run; reconcile/exits/stops still run. Set "
+              "LIVE_ENTRIES_PAUSED=False in entry.py to resume once the cash is reconciled.")
+
     for opp in opportunities:
+        # Hard stop before any per-pick evaluation on a paused live book — nothing
+        # reaches the broker order path below.
+        if live_paused:
+            break
         ticker = opp.get("vehicle", "")
         score = opp.get("total_score", 0)
         opp_id = opp["id"]
