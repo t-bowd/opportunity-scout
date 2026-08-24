@@ -1,27 +1,28 @@
 """
-Weekly portfolio digest.
-Shows open positions with current P&L, closed trades, and graduation progress.
-Opportunities section removed — trading is fully automated.
+Weekly portfolio digest — deliberately terse.
+
+One compact P/L row per open position, a portfolio total, and the return vs the
+S&P 500 (alpha) — nothing else. The alpha/SPY figures reuse snapshot._book_vs_spy
+so this email and the daily run's snapshot line always agree. The book is split
+LIVE (Alpaca real money) vs PAPER (the legacy sim book winding down), same as the
+snapshot; before any live positions exist it prints a single combined block.
 """
 import os
 import requests
 import resend
 from datetime import date, timedelta
+
 from db.client import (
     get_open_paper_positions,
-    get_closed_paper_positions,
     get_latest_paper_snapshot,
-    get_client,
 )
+from paper_trader.exit import _fetch_price
+from paper_trader.snapshot import _book_vs_spy, _daily_closes
 
 resend.api_key = os.environ["RESEND_API_KEY"]
 DIGEST_TO = os.environ["DIGEST_EMAIL"]
 HEADERS = {"User-Agent": "OpportunityScout"}
 
-
-# ---------------------------------------------------------------------------
-# Price helpers
-# ---------------------------------------------------------------------------
 
 def _fetch_fx_rate() -> float:
     try:
@@ -42,251 +43,135 @@ def _fetch_current_price_aud(ticker: str, is_asx: bool, fx_rate: float) -> float
         return None
 
 
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
-
-def _get_opportunities_for_positions(positions: list[dict]) -> dict[str, dict]:
-    """Returns {opportunity_id: opportunity_row} for a list of positions."""
-    ids = [p["opportunity_id"] for p in positions if p.get("opportunity_id")]
-    if not ids:
-        return {}
-    db = get_client()
-    result = db.table("opportunities").select("*").in_("id", ids).execute()
-    return {r["id"]: r for r in result.data}
-
-
-# ---------------------------------------------------------------------------
-# Formatting
-# ---------------------------------------------------------------------------
-
 def _pnl_color(pnl: float) -> str:
     return "#2a7a2a" if pnl >= 0 else "#cc3333"
 
 
-def _format_position_card(pos: dict, opp: dict | None, fx_rate: float) -> str:
-    ticker = pos["ticker"]
-    is_asx = ticker.endswith(".AX")
-    market = pos.get("market", "US")
-    entry_price = float(pos["entry_price_aud"])
-    quantity = pos["quantity"]
-    entry_date = pos.get("entry_date", "")
-    days_held = (date.today() - date.fromisoformat(entry_date)).days if entry_date else "?"
-    score = pos.get("score_at_entry", "?")
-    raw_pattern = pos.get("pattern", "")
-    pattern = raw_pattern.replace("_", " ").title()
-    from paper_trader.exit import MAX_HOLD_DAYS_BY_PATTERN, DEFAULT_MAX_HOLD_DAYS
-    max_hold = MAX_HOLD_DAYS_BY_PATTERN.get(raw_pattern, DEFAULT_MAX_HOLD_DAYS)
-    trailing = pos.get("trailing_stop_active", False)
-    peak = pos.get("peak_price_aud")
+def _position_pnl(pos: dict, fx_rate: float) -> tuple[float | None, float | None]:
+    """(pnl_pct, pnl_aud) for one open position, or (None, None) if price is unavailable."""
+    is_asx = pos["ticker"].endswith(".AX")
+    entry = float(pos["entry_price_aud"])
+    qty = pos["quantity"]
+    price = _fetch_current_price_aud(pos["ticker"], is_asx, fx_rate)
+    if not price or entry <= 0:
+        return None, None
+    pnl_pct = (price - entry) / entry * 100
+    pnl_aud = (price - entry) * qty - float(pos.get("brokerage_aud", 0))
+    return pnl_pct, pnl_aud
 
-    # Current P&L
-    current_price = _fetch_current_price_aud(ticker, is_asx, fx_rate)
-    if current_price:
-        pnl_pct = (current_price - entry_price) / entry_price * 100
-        pnl_aud = (current_price - entry_price) * quantity - float(pos.get("brokerage_aud", 0))
-        pnl_color = _pnl_color(pnl_aud)
-        pnl_str = (
-            f"<span style='color:{pnl_color};font-weight:600;'>"
-            f"{pnl_pct:+.1f}% &nbsp; ${pnl_aud:+.2f} AUD</span>"
-        )
-        current_str = f"${current_price:.2f} AUD"
-    else:
-        pnl_str = "<span style='color:#888;'>price unavailable</span>"
-        current_str = "n/a"
 
-    # Trailing stop floor
-    trail_section = ""
-    if trailing and peak:
-        from paper_trader.exit import TRAILING_STOP_TRAIL_PCT
-        floor = float(peak) * (1 - TRAILING_STOP_TRAIL_PCT / 100)
-        trail_section = (
-            f"<p style='font-size:12px;background:#fff3cd;padding:6px 10px;"
-            f"border-radius:4px;margin:8px 0;'>"
-            f"🔒 Trailing stop active — floor ${floor:.2f} AUD "
-            f"(peak ${float(peak):.2f} AUD)</p>"
-        )
+def _book_block(label: str, positions: list[dict], fx_rate: float,
+                spy_hist, audusd_hist, spy_now) -> str:
+    """A heading, one P/L row per position, and a total + vs-SPY summary line."""
+    if not positions:
+        return ""
 
-    # Why we entered — from the linked opportunity
-    plain_english = opp.get("plain_english", "") if opp else ""
-    signal_explainer = opp.get("signal_type_explainer", "") if opp else ""
-    thesis_html = ""
-    if plain_english:
-        thesis_html = (
-            f"<p style='font-size:14px;line-height:1.6;margin:10px 0;"
-            f"padding:12px 14px;background:#f9f9f9;"
-            f"border-left:3px solid #1a1a1a;border-radius:0 6px 6px 0;'>"
-            f"{plain_english}</p>"
+    # Compute P/L per position, then sort best-first (unpriced sink to the bottom).
+    enriched = []
+    for pos in positions:
+        pnl_pct, pnl_aud = _position_pnl(pos, fx_rate)
+        enriched.append((pos, pnl_pct, pnl_aud))
+    enriched.sort(key=lambda e: (e[1] is not None, e[1] if e[1] is not None else 0), reverse=True)
+
+    total_pnl = sum(e[2] for e in enriched if e[2] is not None)
+    deployed = sum(float(p["entry_price_aud"]) * p["quantity"] + float(p.get("brokerage_aud", 0))
+                   for p in positions)
+
+    rows = ""
+    for pos, pnl_pct, pnl_aud in enriched:
+        ticker = pos["ticker"]
+        entry_date = pos.get("entry_date", "")
+        held = (date.today() - date.fromisoformat(entry_date)).days if entry_date else "?"
+        lock = " 🔒" if pos.get("trailing_stop_active") else ""
+        if pnl_pct is None:
+            cell = "<span style='color:#888;'>price n/a</span>"
+        else:
+            c = _pnl_color(pnl_aud)
+            cell = (f"<span style='color:{c};font-weight:600;'>"
+                    f"{pnl_pct:+.1f}%</span> "
+                    f"<span style='color:{c};'>${pnl_aud:+.0f}</span>")
+        rows += (
+            f"<tr style='border-top:1px solid #f0f0f0;'>"
+            f"<td style='padding:6px 16px 6px 0;'><strong>{ticker}</strong>{lock}</td>"
+            f"<td style='padding:6px 16px 6px 0;color:#888;'>{held}d</td>"
+            f"<td style='padding:6px 0;white-space:nowrap;'>{cell}</td>"
+            f"</tr>"
         )
 
-    market_badge = (
-        f"<span style='font-size:10px;background:#e8f4fd;padding:1px 6px;"
-        f"border-radius:3px;color:#1a6fa8;margin-left:6px;'>{market}</span>"
-    )
-    pattern_badge = (
-        f"<span style='font-size:11px;background:#e8e8e8;padding:2px 8px;"
-        f"border-radius:4px;font-weight:600;'>{pattern}</span>"
-    )
+    # Total + vs S&P 500 (alpha). Same computation as the daily snapshot.
+    tcolor = _pnl_color(total_pnl)
+    summary = (f"<strong style='color:{tcolor};'>${total_pnl:+.0f} AUD</strong> "
+               f"unrealized on ${deployed:,.0f} deployed")
+    bench = _book_vs_spy(positions, fx_rate, spy_hist, audusd_hist, spy_now)
+    if bench:
+        book_pct, spy_pct = bench
+        alpha = book_pct - spy_pct
+        acolor = _pnl_color(alpha)
+        summary += (f" &nbsp;·&nbsp; <strong>{book_pct:+.1f}%</strong> vs "
+                    f"S&amp;P 500 {spy_pct:+.1f}% &rarr; "
+                    f"<strong style='color:{acolor};'>alpha {alpha:+.1f}%</strong>")
 
     return f"""
-<div style='margin-bottom:24px;padding-bottom:24px;border-bottom:1px solid #eee;'>
-  <h3 style='margin:0 0 4px;'>
-    {ticker}{market_badge}
-    {"&nbsp;<span style='font-size:10px;background:#fff3cd;padding:1px 5px;border-radius:3px;color:#856404;'>trailing stop</span>" if trailing else ""}
-  </h3>
-  <p style='margin:0 0 8px;'>{pattern_badge}
-    {"&nbsp;<em style='font-size:12px;color:#666;'>" + signal_explainer + "</em>" if signal_explainer else ""}
-  </p>
-
-  {thesis_html}
-
-  <table style='font-size:13px;color:#444;border-collapse:collapse;margin-top:8px;'>
-    <tr>
-      <td style='padding:3px 20px 3px 0;color:#888;'>P&amp;L</td>
-      <td>{pnl_str}</td>
-    </tr>
-    <tr>
-      <td style='padding:3px 20px 3px 0;color:#888;'>Current price</td>
-      <td>{current_str}</td>
-    </tr>
-    <tr>
-      <td style='padding:3px 20px 3px 0;color:#888;'>Entry price</td>
-      <td>${entry_price:.2f} AUD &times; {quantity} shares</td>
-    </tr>
-    <tr>
-      <td style='padding:3px 20px 3px 0;color:#888;'>Held</td>
-      <td>{days_held} days &nbsp;·&nbsp; {max(0, max_hold - days_held) if isinstance(days_held, int) else "?"} of {max_hold}d remaining</td>
-    </tr>
-    <tr>
-      <td style='padding:3px 20px 3px 0;color:#888;'>Score</td>
-      <td>{score}/20</td>
-    </tr>
-  </table>
-
-  {trail_section}
-</div>
+<h2 style='margin:24px 0 8px;font-size:16px;'>{label} <span style='color:#888;font-weight:400;'>({len(positions)})</span></h2>
+<table style='width:100%;border-collapse:collapse;font-size:14px;'>{rows}</table>
+<p style='font-size:13px;margin:10px 0 0;padding-top:8px;border-top:1px solid #e0e0e0;'>{summary}</p>
 """
 
 
-def _format_closed_section(recent_closed: list[dict], opps: dict) -> str:
-    if not recent_closed:
+def _realized_line(snap: dict | None) -> str:
+    if not snap or not snap.get("closed_trades"):
         return ""
-
-    rows = ""
-    for p in recent_closed:
-        pnl = float(p.get("pnl_aud") or 0)
-        pnl_pct = float(p.get("pnl_pct") or 0)
-        color = _pnl_color(pnl)
-        reason_map = {
-            "time_exit": "Time exit",
-            "stop_loss": "Stop loss −12%",
-            "trailing_stop": "Trailing stop",
-            "manual": "Manual close",
-        }
-        reason = reason_map.get(p.get("exit_reason", ""), p.get("exit_reason", "").replace("_", " ").title())
-        opp = opps.get(p.get("opportunity_id", ""))
-        plain = opp.get("plain_english", "")[:120] + "…" if opp and opp.get("plain_english") else ""
-
-        rows += f"""
-<tr style='border-top:1px solid #f0f0f0;'>
-  <td style='padding:8px 16px 8px 0;vertical-align:top;'>
-    <strong>{p['ticker']}</strong>
-    <div style='font-size:11px;color:#888;'>{plain}</div>
-  </td>
-  <td style='padding:8px 16px 8px 0;vertical-align:top;color:{color};font-weight:600;white-space:nowrap;'>
-    {pnl_pct:+.1f}%<br>${pnl:+.2f} AUD
-  </td>
-  <td style='padding:8px 0;vertical-align:top;color:#888;font-size:12px;'>{reason}</td>
-</tr>"""
-
-    return f"""
-<h2 style='margin:28px 0 12px;border-top:2px solid #1a1a1a;padding-top:16px;'>Closed This Week</h2>
-<table style='width:100%;border-collapse:collapse;font-size:13px;'>
-  <tr style='color:#888;font-size:11px;'>
-    <th style='text-align:left;padding:4px 16px 4px 0;'>Position</th>
-    <th style='text-align:left;padding:4px 16px 4px 0;'>Result</th>
-    <th style='text-align:left;padding:4px 0;'>Exit reason</th>
-  </tr>
-  {rows}
-</table>"""
-
-
-def _format_stats(snap: dict | None, open_count: int) -> str:
-    if not snap:
-        return "<p style='font-size:13px;color:#888;'>No closed trades yet.</p>"
-
     closed = snap.get("closed_trades", 0)
-    expectancy = snap.get("expectancy_aud")
-    win_rate = snap.get("win_rate")
-    total_pnl = float(snap.get("total_pnl_aud", 0))
-    needed = max(0, 20 - closed)
-    progress_pct = min(100, int(closed / 20 * 100))
-    bar = "█" * round(progress_pct / 10) + "░" * (10 - round(progress_pct / 10))
-
-    exp_str = f"${float(expectancy):+.2f}" if expectancy is not None else "n/a"
-    wr_str = f"{float(win_rate):.0f}%" if win_rate is not None else "n/a"
-
-    return f"""
-<h2 style='margin:28px 0 12px;border-top:2px solid #1a1a1a;padding-top:16px;'>Graduation Progress</h2>
-<p style='font-size:13px;'><strong>{closed}/20 trades</strong> &nbsp; {bar} &nbsp; {progress_pct}%</p>
-<table style='font-size:13px;color:#444;border-collapse:collapse;'>
-  <tr><td style='padding:3px 24px 3px 0;color:#888;'>Avg P&amp;L per trade</td><td><strong>{exp_str} AUD</strong></td></tr>
-  <tr><td style='padding:3px 24px 3px 0;color:#888;'>Win rate</td><td><strong>{wr_str}</strong></td></tr>
-  <tr><td style='padding:3px 24px 3px 0;color:#888;'>Total P&amp;L</td><td><strong>${total_pnl:+.2f} AUD</strong></td></tr>
-</table>
-<p style='font-size:12px;color:#888;margin-top:8px;'>
-  {needed} more closed trades needed. Positive expectancy across 20 = graduate to real money.
-</p>"""
+    total = float(snap.get("total_pnl_aud", 0))
+    win = snap.get("win_rate")
+    win_str = f" · win rate {float(win):.0f}%" if win is not None else ""
+    c = _pnl_color(total)
+    return (f"<p style='font-size:13px;color:#444;margin:20px 0 0;'>"
+            f"Realized to date: <strong style='color:{c};'>${total:+.0f} AUD</strong> "
+            f"across {closed} closed trades{win_str}</p>")
 
 
 def _build_html(week_of: str) -> str:
     open_pos = get_open_paper_positions()
-    closed_pos = get_closed_paper_positions()
     snap = get_latest_paper_snapshot()
-
-    cutoff = (date.fromisoformat(week_of) - timedelta(days=1)).isoformat()
-    recent_closed = [p for p in closed_pos if p.get("exit_date") and p["exit_date"] >= cutoff]
-
-    all_positions = open_pos + recent_closed
-    opps = _get_opportunities_for_positions(all_positions)
-
     fx_rate = _fetch_fx_rate()
 
-    # Open position cards
-    from paper_trader.entry import MAX_POSITIONS
-    if open_pos:
-        cards = "\n".join(
-            _format_position_card(p, opps.get(p.get("opportunity_id", "")), fx_rate)
-            for p in open_pos
+    # Fetch the SPY / FX history once and share it across both book blocks.
+    spy_hist = _daily_closes("SPY")
+    audusd_hist = _daily_closes("AUDUSD=X")
+    spy_now = _fetch_price("SPY")
+
+    live_pos = [p for p in open_pos if p.get("broker") == "alpaca"]
+    paper_pos = [p for p in open_pos if p.get("broker") != "alpaca"]
+
+    if live_pos:
+        body = (
+            _book_block("LIVE — real money", live_pos, fx_rate, spy_hist, audusd_hist, spy_now)
+            + _book_block("PAPER — winding down", paper_pos, fx_rate, spy_hist, audusd_hist, spy_now)
         )
-        open_html = f"<h2 style='margin:0 0 16px;'>Open Positions ({len(open_pos)}/{MAX_POSITIONS} slots)</h2>{cards}"
+    elif open_pos:
+        body = _book_block("Open positions", open_pos, fx_rate, spy_hist, audusd_hist, spy_now)
     else:
-        open_html = (
-            f"<h2 style='margin:0 0 8px;'>Open Positions (0/{MAX_POSITIONS} slots)</h2>"
-            "<p style='color:#888;font-size:13px;'>No open positions this week — "
-            "all candidates failed entry filters.</p>"
-        )
+        body = "<p style='color:#888;font-size:14px;'>No open positions.</p>"
 
-    closed_html = _format_closed_section(recent_closed, opps)
-    stats_html = _format_stats(snap, len(open_pos))
+    realized = _realized_line(snap)
 
+    # Force a light background with explicit colors: email clients (and preview
+    # panes) in dark mode would otherwise render this dark text on a dark ground.
     return f"""
 <html>
-<body style="font-family:-apple-system,sans-serif;max-width:680px;margin:0 auto;color:#1a1a1a;">
-  <h1 style="border-bottom:2px solid #1a1a1a;padding-bottom:8px;">
-    Opportunity Scout — Week of {week_of}
-  </h1>
-  <p style="color:#888;font-size:13px;margin-top:0;">
-    Paper portfolio update · $2,000 pool · ~$200 AUD base, scaled by conviction · automated entry &amp; exit
-  </p>
-
-  {open_html}
-  {closed_html}
-  {stats_html}
-
-  <p style="font-size:11px;color:#999;border-top:1px solid #eee;padding-top:12px;margin-top:28px;">
-    Not financial advice. This is a paper trading system. Do your own research before deploying real capital.
-  </p>
+<body style="margin:0;padding:0;background-color:#ffffff;">
+  <div style="font-family:-apple-system,sans-serif;max-width:560px;margin:0 auto;
+              padding:20px;color:#1a1a1a;background-color:#ffffff;">
+    <h1 style="border-bottom:2px solid #1a1a1a;padding-bottom:8px;font-size:20px;margin-top:0;">
+      Opportunity Scout — Week of {week_of}
+    </h1>
+    {body}
+    {realized}
+    <p style="font-size:11px;color:#999;border-top:1px solid #eee;padding-top:12px;margin-top:24px;">
+      🔒 = trailing stop active. Not financial advice.
+    </p>
+  </div>
 </body>
 </html>
 """
