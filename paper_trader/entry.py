@@ -103,14 +103,17 @@ LIVE_MAX_SINGLE_NAME_FRAC = 0.25   # never more than 25% of equity in one positi
 # 13-14 bucket while keeping enough names to fill a small book.
 LIVE_MIN_SCORE = 15
 
-# MANUAL SAFETY HOLD (2026-08-21): a duplicate $681.30 cash deposit posted to the
-# Alpaca account (Aug 19 AND Aug 20) — source unconfirmed (possible instant-deposit
-# double-credit that could reverse, or a genuine duplicate bank transfer). Until
-# that is reconciled with the bank/Alpaca, place NO new real-money entries so we
-# never deploy cash that might vanish. This gates LIVE entries ONLY — reconcile,
-# exits, and resting stops all keep running, so the existing 10 positions stay
-# fully managed. Set back to False to resume live entries once the cash is cleared.
-LIVE_ENTRIES_PAUSED = True
+# MANUAL SAFETY HOLD switch for live real-money entries. Gates LIVE entries ONLY
+# (prints a banner + breaks the entry loop before the broker order path); reconcile,
+# exits, and resting stops keep running so existing positions stay managed. Paper
+# is unaffected. Set True to freeze new real-money entries.
+#
+# History: held True 2026-08-21 → 2026-08-26 after a duplicate $681.30 credit posted
+# to Alpaca (Aug 19 AND Aug 20). RESOLVED — Alpaca reversed the duplicate on Aug 25
+# (equity fell $2,778→$1,827 AUD, back to the true balance); because the hold kept
+# us from deploying the phantom cash, the reversal hit only idle cash, no positions.
+# Lifted 2026-08-26 once the reversal confirmed the account was clean.
+LIVE_ENTRIES_PAUSED = False
 
 MAX_PRICE_MOVE_PCT = 8.0
 EARNINGS_BLACKOUT_DAYS = 7
