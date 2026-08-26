@@ -45,17 +45,28 @@ A −12% stop and a 10% trail would have shredded most of these mid-swing.
 ## 3. Pool & sizing
 
 ```
-SMALLCAP_POOL_AUD      = 1000.0  # HARD cap (not soft like the main book)
+SMALLCAP_POOL_AUD      = 2000.0  # HARD cap (not soft like the main book)
 SMALLCAP_POSITION_AUD  =  100.0  # EQUAL weight — no conviction scaling
-SMALLCAP_MAX_POSITIONS =   10
+SMALLCAP_MAX_POSITIONS =   20
+MAX_PER_VERTICAL       =   10
 ```
 
-**Why 10 × $100 and not 20 × $50?** Power-law strategies want *more* bets, so 20
-would be the instinct. But the **5-per-vertical correlation cap (§6) is the
-binding constraint** — only two verticals are productive today (`biotech`,
-`asx_ann`), so 5+5 = 10 is the practical ceiling. Widening to 20 would mean ~10
-biotech positions, i.e. exactly the fake-diversification trap the 07-14 broad
-cooling exposed. If a third vertical becomes productive, revisit 20 × $50.
+**WIDENED 2026-08-26 → 20 × $100, pool $2,000, per-vertical cap 10.** The book sat
+full at 10/10 for weeks, so it stopped capturing the ongoing flow of climbing
+screen names — starving the research dataset the 4–6wk review needs. Since this is
+a PAPER sleeve (no real money), the only cost of more slots is more (noisy) data,
+which is the point. Doubled the SLOT COUNT + pool + per-vertical cap; kept the $100
+equal weight (so it's 2× the *picks*, not bigger bets). NB this deliberately
+accepts more correlation within a vertical (the original concern below) — for a
+data-gathering paper book that's an acceptable trade; the per-vertical cap of 10
+still prevents an all-one-vertical book.
+
+**(Original rationale, now superseded) Why 10 × $100 and not 20 × $50?** Power-law
+strategies want *more* bets, so 20 would be the instinct. But the **5-per-vertical
+correlation cap (§6) was the binding constraint** — only two verticals are
+productive today (`biotech`, `asx_ann`), so 5+5 = 10 was the practical ceiling.
+Widening was flagged as risking the fake-diversification trap the 07-14 broad
+cooling exposed — accepted 2026-08-26 in exchange for the data.
 
 - **Hard budget, not soft.** The main book lets high-conviction picks breach its
   pool. The sleeve must not: spec money is strictly bounded. (This also rehearses
@@ -170,7 +181,7 @@ name hasn't moved in ~6 weeks, the catalyst is spent.
 ## 6. Correlation caps — fake diversification is the real risk
 
 ```
-MAX_PER_VERTICAL = 5      # of 10 positions
+MAX_PER_VERTICAL = 10     # of 20 positions (widened 2026-08-26; was 5 of 10)
 ```
 
 **Evidence:** on **07-14** nearly the entire biotech list cooled together. Ten
@@ -221,7 +232,7 @@ Not "did it make money" — the sample is too small. Instead, after ~4–6 weeks
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Pool size | **$1,000** → 10 × $100 equal weight. Not 20 × $50: the 5/vertical cap binds at 10 (§3). |
+| 1 | Pool size | **$2,000** → 20 × $100 equal weight (widened 2026-08-26 from $1,000/10 for data capture; per-vertical cap raised 5→10). |
 | 2 | Trail | **Arm +30%, trail 20%, ratcheting tighter** (17% past +100%, 15% past +300%). Gentle on purpose — the tail is the whole return (§5.2). |
 | 3 | Biotech future-dated only | **Yes, strict.** The pre-catalyst exit needs a future date to exist; already-fired names would silently be a different strategy (§4.4). |
 | 4 | Cap band | **$10M–$500M.** Power-law upside needs a small base. Accepted tradeoff: least liquid, most promoted end (§4.3, §7.1). |

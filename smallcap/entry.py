@@ -19,10 +19,16 @@ from smallcap.exit import parse_catalyst_date
 from smallcap.pricing import fetch_fx_rate, to_aud
 
 # --- Parameters (SPEC, DECIDED 2026-07-16) ---
-SMALLCAP_POOL_AUD = 1000.0        # HARD cap (unlike the main book's soft pool)
+# Widened 2026-08-26 (paper sleeve, no real money): the book had been full at
+# 10/10 for weeks, so it was NOT capturing the ongoing flow of climbing screen
+# names — starving the research dataset the 4-6wk review needs. Doubled the SLOT
+# COUNT (and pool + per-vertical cap to match), NOT the position size, so we get
+# ~2x the picks/data at the same $100 equal weight. Positions stay tiny by design.
+SMALLCAP_POOL_AUD = 2000.0        # HARD cap (unlike the main book's soft pool)
 SMALLCAP_POSITION_AUD = 100.0     # equal weight — no conviction scaling
-SMALLCAP_MAX_POSITIONS = 10
-MAX_PER_VERTICAL = 5              # correlation cap (07-14 broad-cooling evidence)
+SMALLCAP_MAX_POSITIONS = 20
+MAX_PER_VERTICAL = 10             # correlation cap; raised with the slot count so
+                                  # a vertical can actually fill the new slots
 MIN_CAP = 10e6
 MAX_CAP = 500e6
 ASX_ANN_MAX_AGE_DAYS = 10

@@ -11,7 +11,7 @@ from smallcap.exit import (
     trail_pct_for, parse_catalyst_date, business_days_until, evaluate,
     TRAIL_ARM_PCT, DISASTER_STOP_PCT,
 )
-from smallcap.entry import passes_gates
+from smallcap.entry import passes_gates, MAX_PER_VERTICAL
 
 TODAY = date(2026, 7, 16)
 _fails = 0
@@ -105,7 +105,8 @@ check("not climbing rejected", not passes_gates({**bio, "climbing": False}, held
 check("cap over $500M rejected", not passes_gates({**bio, "market_cap": 600e6}, held, vc, TODAY)[0])
 check("biotech past-dated rejected", not passes_gates({**bio, "catalyst_date": "2026-06-01"}, held, vc, TODAY)[0])
 check("already held rejected", not passes_gates(bio, {"AKBA"}, vc, TODAY)[0])
-check("vertical cap full rejected", not passes_gates(bio, held, {"biotech": 5}, TODAY)[0])
+check("under vertical cap passes", passes_gates(bio, held, {"biotech": MAX_PER_VERTICAL - 1}, TODAY)[0])
+check("vertical cap full rejected", not passes_gates(bio, held, {"biotech": MAX_PER_VERTICAL}, TODAY)[0])
 asx = {"ticker": "ERE.AX", "vertical": "asx_ann", "market_cap": 10e6, "climbing": True,
        "catalyst_date": "2026-07-14", "exchange": "ASX"}
 check("fresh asx_ann passes", passes_gates(asx, held, vc, TODAY)[0])
