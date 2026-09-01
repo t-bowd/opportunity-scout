@@ -2,12 +2,22 @@ name: Daily Collection
 
 on:
   schedule:
-    # 16:00 UTC = mid US session (noon ET in summer / 11am ET in winter), always
-    # comfortably inside 09:30–16:00 ET even with GitHub Actions' cron lag. Running
-    # mid-session means paper entries/exits fill at a live, tradeable price rather
-    # than at/after the close — so the paper P&L reflects fills we could actually
-    # get. 7 days/week (weekend runs still process news + paper exits).
+    # THREE runs across the US session for REDUNDANCY, not because we want to trade
+    # three times. GitHub Actions' scheduled-event queue backs up under load and has
+    # been firing these HOURS late (observed 3–8.7h), repeatedly landing the run AFTER
+    # the 20:00 UTC close — where the broker (Alpaca) refuses live BUYs (market closed)
+    # and every live entry defers, so open slots never refill. Live BUYs need a run
+    # that lands inside market hours (13:30–20:00 UTC summer / 14:30–21:00 winter).
+    #
+    # One schedule can't guarantee that against a variable multi-hour lag, so we fire
+    # three and let the idempotency guard in run_daily.py make the extra runs cheap
+    # (collect+score once/day; the cheap trade stages re-run and fill any slots the
+    # earlier run deferred). 14:00 is the workhorse — even a ~6h lag lands it by the
+    # 20:00 summer close; 16:00/18:00 backstop a dropped 14:00 run and the winter open.
+    # 7 days/week (weekend runs still process news + paper exits; entries just defer).
+    - cron: "0 14 * * *"
     - cron: "0 16 * * *"
+    - cron: "0 18 * * *"
   workflow_dispatch:  # allow manual trigger
 
 jobs:
