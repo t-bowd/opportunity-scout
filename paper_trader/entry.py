@@ -103,6 +103,16 @@ LIVE_MAX_SINGLE_NAME_FRAC = 0.25   # never more than 25% of equity in one positi
 # 13-14 bucket while keeping enough names to fill a small book.
 LIVE_MIN_SCORE = 15
 
+# Entry staggering — max NEW real-money entries per calendar day, across the 3
+# redundant daily runs (see daily.yml). The Aug-2026 live losses were dominated by
+# a single 5-name cohort all bought on one down-market day (ECG/TG/NRGV/RICK/REZI):
+# 3 stopped out, the other 2 are the worst open reds. Filling many slots into one
+# tape concentrates regime risk that the forward-return analysis can't see per-pick.
+# Spreading fills over days decorrelates it — a slower ramp to full, not fewer names
+# overall. The cap counts positions already opened TODAY from the book, so it holds
+# across the day's multiple runs, not just one. Paper book is unaffected.
+LIVE_MAX_ENTRIES_PER_DAY = 2
+
 # MANUAL SAFETY HOLD switch for live real-money entries. Gates LIVE entries ONLY
 # (prints a banner + breaks the entry loop before the broker order path); reconcile,
 # exits, and resting stops keep running so existing positions stay managed. Paper
@@ -396,6 +406,16 @@ def run_entries(week_of: str | None = None) -> None:
     entered = 0
     reviewed = 0   # candidates surfaced for manual assessment (review mode only)
 
+    # Entry staggering: how many live real-money positions were ALREADY opened
+    # today (possibly by an earlier of the day's redundant runs). The per-day cap
+    # is enforced against this + entries made in this run, so 3 runs/day can't
+    # stack up to 3× the intended fills. Live/US only; paper is uncapped.
+    _today_iso = date.today().isoformat()
+    live_opened_today = sum(
+        1 for p in open_positions
+        if p.get("broker") == "alpaca" and p.get("entry_date") == _today_iso
+    ) if live else 0
+
     # Manual real-money safety hold. When live entries are paused we still fall
     # through the loop (so REVIEW/skip diagnostics print as usual) but no live
     # pick is ever allowed to place an order — see the guard at the top of the loop.
@@ -601,6 +621,16 @@ def run_entries(week_of: str | None = None) -> None:
                 f"[{opp.get('pattern', 'unknown')}] — would be ${entry_price_aud:.2f} AUD "
                 f"× {quantity} = ${cost_aud:.2f} AUD. Book at max; assess by hand."
             )
+            continue
+
+        # Entry staggering (live real money only): stop opening new positions once
+        # today's live entries — counting any from earlier redundant runs plus this
+        # run — reach the per-day cap. Keeps evaluating later candidates only to log
+        # them; nothing more can enter today. Decorrelates the same-day-cohort regime
+        # risk that produced the Aug-2026 stop cluster. Not a book-full state, so we
+        # don't flip into review mode — the slots are open, we're just pacing.
+        if live and (live_opened_today + entered) >= LIVE_MAX_ENTRIES_PER_DAY:
+            skip("live_daily_entry_cap")
             continue
 
         # US names route through the broker (Alpaca) when it's configured: submit
