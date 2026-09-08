@@ -70,6 +70,31 @@ DEFAULT_MAX_HOLD_DAYS = 45
 STOP_LOSS_PCT = -12.0
 SLIPPAGE_PCT = 0.5      # 0.5% worse than market on exit
 
+# Time-exit reprieve for slow, still-developing winners. In a ~63%-win, −12%-capped
+# book the profit lives in the right tail, and the forward-return analysis shows
+# winners peak in MONTH 2 — but the calendar time-exit cuts a GREEN name at the
+# limit if it hasn't armed (+20%) yet, clipping exactly those slow month-2 winners
+# before they can arm. So a name that has already shown a real move (peak ≥ MIN_PEAK)
+# and is still holding near that peak (within BAND of it = climbing, not faded) earns
+# a BOUNDED extension past the limit — enough time to arm or fade on its own. Armed
+# names are already exempt upstream; a name that round-tripped well off its peak gets
+# no reprieve and time-exits as before.
+TIME_EXIT_REPRIEVE_MIN_PEAK_PCT = 10.0  # must have reached +10% peak (halfway to the arm)
+TIME_EXIT_REPRIEVE_BAND_PCT     = 10.0  # ...and still be within 10% of that peak
+TIME_EXIT_REPRIEVE_DAYS         = 30    # cap the extension so nothing is held forever
+
+
+def _time_exit_reprieved(days_held: int, max_hold: int, peak_gain_pct: float,
+                         exit_price: float, peak_price: float) -> bool:
+    """Pure: should a not-yet-armed name past its time limit get extra leash?
+    True only while it showed a real move, is still near its peak, and hasn't
+    used up the bounded extension. Smoke-tested — this gates a real-money exit."""
+    if peak_gain_pct < TIME_EXIT_REPRIEVE_MIN_PEAK_PCT:
+        return False
+    if days_held >= max_hold + TIME_EXIT_REPRIEVE_DAYS:
+        return False
+    return peak_price > 0 and exit_price >= peak_price * (1 - TIME_EXIT_REPRIEVE_BAND_PCT / 100)
+
 
 def _fetch_price(ticker: str) -> float | None:
     try:
@@ -173,11 +198,14 @@ def run_exits() -> None:
         # the simulator logic below so the position is never left unmanaged.
         if pos.get("broker") == "alpaca" and broker_config.enabled():
             max_hold = MAX_HOLD_DAYS_BY_PATTERN.get(pos.get("pattern", ""), DEFAULT_MAX_HOLD_DAYS)
+            reprieved = (days_held >= max_hold and not trailing_active
+                         and _time_exit_reprieved(days_held, max_hold, peak_gain_pct,
+                                                  exit_price_aud, new_peak))
             if trailing_active and not was_active:
                 new_exit_id = broker_execution.arm_trailing(pos)
                 if new_exit_id:
                     update_paper_position_broker_exit(pos["id"], new_exit_id)
-            elif days_held >= max_hold and not trailing_active:
+            elif days_held >= max_hold and not trailing_active and not reprieved:
                 sell_id = broker_execution.time_exit(pos)
                 if sell_id:
                     update_paper_position_broker_exit(pos["id"], sell_id)
@@ -187,6 +215,8 @@ def run_exits() -> None:
             armed_note = (
                 f"trailing stop live @ broker (peak +{peak_gain_pct:.1f}%)"
                 if trailing_active
+                else f"green+climbing past {max_hold}d — time-exit reprieved (peak +{peak_gain_pct:.1f}%)"
+                if reprieved
                 else f"{max_hold - days_held}d to {max_hold}d time limit"
             )
             print(f"[paper/exit] HOLD {ticker} (broker) — "
@@ -198,7 +228,12 @@ def run_exits() -> None:
         max_hold = MAX_HOLD_DAYS_BY_PATTERN.get(pos.get("pattern", ""), DEFAULT_MAX_HOLD_DAYS)
         # Time exit applies only if the trailing stop ISN'T armed — let live
         # winners run on the trailing stop instead of cutting them by the calendar.
-        time_exit_due = days_held >= max_hold and not trailing_active
+        # A green name still climbing toward the arm also gets a bounded reprieve
+        # so slow month-2 winners aren't cut early (see _time_exit_reprieved).
+        reprieved = (days_held >= max_hold and not trailing_active
+                     and _time_exit_reprieved(days_held, max_hold, peak_gain_pct,
+                                              exit_price_aud, new_peak))
+        time_exit_due = days_held >= max_hold and not trailing_active and not reprieved
 
         if trailing_active and exit_price_aud < trailing_stop_price:
             exit_reason = "trailing_stop"
@@ -214,6 +249,9 @@ def run_exits() -> None:
                 # past the time limit only reachable here when trailing stop is armed
                 extra = " (past time limit — trailing stop running)" if days_held >= max_hold else ""
                 trail_note = f" | trailing stop armed, floor ${trailing_stop_price:.2f}{extra}"
+            elif reprieved:
+                trail_note = (f" | green+climbing past {max_hold}d — time-exit reprieved "
+                              f"(peak +{peak_gain_pct:.1f}%, up to {max_hold + TIME_EXIT_REPRIEVE_DAYS}d)")
             else:
                 trail_note = f" | {max_hold - days_held}d to {max_hold}d time limit"
             print(

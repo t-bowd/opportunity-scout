@@ -117,6 +117,17 @@ check("entry._target_position_size tiers",
       lambda: [entry._target_position_size(s) for s in (13, 16, 18)])
 check("exit._pnl_to_grade",
       lambda: [pexit._pnl_to_grade(p) for p in (-20, -5, 0, 5, 20)])
+def _check_time_exit_reprieve():
+    r = pexit._time_exit_reprieved
+    # green, still near a +15% peak, just past the 60d limit -> reprieved
+    assert r(61, 60, 15.0, 1.15, 1.15) is True
+    # never showed a real move (peak +4%) -> no reprieve, time-exits
+    assert r(61, 60, 4.0, 1.02, 1.04) is False
+    # peaked +15% but round-tripped >10% off it -> faded, no reprieve
+    assert r(61, 60, 15.0, 1.00, 1.15) is False
+    # reprieve is bounded: past max_hold + REPRIEVE_DAYS -> back to time-exit
+    assert r(91, 60, 15.0, 1.15, 1.15) is False
+check("exit._time_exit_reprieved (bounded green-climbing leash)", _check_time_exit_reprieve)
 
 # --- 4. Broker layer: pure logic + fail-soft when disabled ---------------------
 from broker import config as bcfg, alpaca as balpaca, execution as bexec, reconcile as brecon
