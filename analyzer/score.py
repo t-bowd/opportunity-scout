@@ -247,6 +247,12 @@ def _get_price_context(ticker: str) -> dict:
         price = meta.get("regularMarketPrice")
         week52_high = max(closes) if closes else None
         week52_low = min(closes) if closes else None
+        # Trailing 20-session return at score time — the "entry-extension" feature
+        # (bought after a big run-up?). Free here: we already have the 1y closes.
+        ret_20d = (
+            round(closes[-1] / closes[-21] - 1, 4)
+            if len(closes) >= 21 and closes[-21] else None
+        )
         ytd_pct = (
             round((price - closes[0]) / closes[0] * 100, 1)
             if closes and closes[0] and price
@@ -267,11 +273,12 @@ def _get_price_context(ticker: str) -> dict:
             "week52_low": round(week52_low, 2) if week52_low else None,
             "ytd_change_pct": ytd_pct,
             "avg_dollar_volume": avg_dollar_volume,
+            "ret_20d": ret_20d,
         }
     except Exception:
         return {
             "price": None, "week52_high": None, "week52_low": None,
-            "ytd_change_pct": None, "avg_dollar_volume": None,
+            "ytd_change_pct": None, "avg_dollar_volume": None, "ret_20d": None,
         }
 
 
@@ -490,6 +497,11 @@ def score_week(week_of: str | None = None) -> list[str]:
             "liquidity": opp.get("liquidity", 0),
             "timing": opp.get("timing", 0),
             "price_at_score": price,
+            # Loser-signal instrumentation (migration 005) — persisted for the next
+            # analysis to test; feeds NO gate yet. rescore_action captures "already
+            # fading at entry"; ret_20d_at_score captures "bought extended".
+            "rescore_action": action,
+            "ret_20d_at_score": px.get("ret_20d"),
             "catalyst_date": opp.get("catalyst_date"),
             "signal_ids": matched_signal_ids,
             "week_of": week_of,

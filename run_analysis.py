@@ -81,7 +81,8 @@ def run() -> None:
     rows = db.table("feedback").select(
         "acted, price_30d, price_90d, "
         "opportunities(vehicle, pattern, total_score, conviction, asymmetry, "
-        "liquidity, timing, price_at_score, created_at)"
+        "liquidity, timing, price_at_score, created_at, "
+        "rescore_action, ret_20d_at_score)"
     ).execute().data
 
     price_col = "price_90d" if HORIZON == 90 else "price_30d"
@@ -112,6 +113,9 @@ def run() -> None:
             "conviction": opp.get("conviction") or 0, "asymmetry": opp.get("asymmetry") or 0,
             "liquidity": opp.get("liquidity") or 0, "timing": opp.get("timing") or 0,
             "acted": bool(r.get("acted")), "ret": ret, "alpha": alpha,
+            "rescore_action": opp.get("rescore_action"),
+            "ret_20d_at_score": (float(opp["ret_20d_at_score"])
+                                 if opp.get("ret_20d_at_score") is not None else None),
         }
         # Dedupe by ticker: keep the highest-scored occurrence.
         if tkr not in recs or rec["score"] > recs[tkr]["score"]:
@@ -172,6 +176,39 @@ def run() -> None:
             continue
         n, avg, med, win, a = _agg(sub)
         print(f"{label:>8}: n={n:>3}  avg {_fmt_pct(avg)}  median {_fmt_pct(med)}  win {win*100:4.0f}%  α {_fmt_pct(a)}")
+
+    # 5. Rescore-at-entry: does a name marked DOWN on its scoring day underperform?
+    # (Instrumented migration 005; only rows scored after that fill in — NULL before.)
+    print("\n── Return by rescore-at-entry (hypothesis: rescore_down = already fading) ──")
+    _has_rescore = [d for d in data if d.get("rescore_action")]
+    if len(_has_rescore) < MIN_N:
+        print(f"  (only {len(_has_rescore)} instrumented rows — accruing since migration 005; re-check later)")
+    else:
+        for act in ("insert", "rescore_up", "rescore_down"):
+            sub = [d for d in _has_rescore if d["rescore_action"] == act]
+            if len(sub) < MIN_N:
+                print(f"{act:>13} | {len(sub):>3} |   (too few)")
+                continue
+            n, avg, med, win, a = _agg(sub)
+            print(f"{act:>13} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win*100:4.0f}% | {_fmt_pct(a)}")
+
+    # 6. Entry extension: does buying a name already run-up (high trailing 20d) revert?
+    print("\n── Return by entry extension (trailing 20d at score; hypothesis: extended = reverts) ──")
+    _has_ext = [d for d in data if d.get("ret_20d_at_score") is not None]
+    if len(_has_ext) < MIN_N:
+        print(f"  (only {len(_has_ext)} instrumented rows — accruing since migration 005; re-check later)")
+    else:
+        EXT_BUCKETS = [(-9.9, 0.0, "≤0%"), (0.0, 0.20, "0-20%"),
+                       (0.20, 0.50, "20-50%"), (0.50, 9.9, ">50%")]
+        c = _pearson([d["ret_20d_at_score"] for d in _has_ext], [d["ret"] for d in _has_ext])
+        print(f"  corr(trailing-20d, forward-{HORIZON}d return): {c:+.2f}" if c is not None else "  corr: n/a")
+        for lo, hi, label in EXT_BUCKETS:
+            sub = [d for d in _has_ext if lo <= d["ret_20d_at_score"] < hi]
+            if len(sub) < MIN_N:
+                print(f"{label:>7} | {len(sub):>3} |   (too few)")
+                continue
+            n, avg, med, win, a = _agg(sub)
+            print(f"{label:>7} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win*100:4.0f}% | {_fmt_pct(a)}")
     print()
 
 
