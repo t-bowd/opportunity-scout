@@ -111,6 +111,34 @@ def open_position(ticker: str, qty: int, opportunity_id: str) -> dict | None:
         return DEFERRED
 
 
+def move_stop_to_breakeven(position: dict) -> str | None:
+    """Cancel the resting hard stop and re-rest it at the ENTRY price.
+
+    Called once, when a position's peak gain first clears BREAKEVEN_ARM_PCT but
+    before the +20% trail arms — so a name that runs up and then rolls over
+    scratches at ~0% instead of giving back the whole move AND taking the −12%
+    loss. Returns the new exit order id, or None if disabled/errored (caller keeps
+    the old resting stop, so a failure is soft — the −12% protection stays)."""
+    cli = alpaca.client()
+    if cli is None:
+        return None
+    ticker = position["ticker"]
+    qty = int(position["quantity"])
+    entry_px = float(position.get("entry_price_usd") or 0)
+    if entry_px <= 0:
+        return None
+    try:
+        if position.get("broker_exit_order_id"):
+            cli.cancel_order(position["broker_exit_order_id"])
+        stop = cli.submit_stop_sell(
+            ticker, qty, entry_px, client_order_id=f"os-be-{position['id']}")
+        print(f"[broker] {ticker} stop RAISED TO BREAKEVEN @ ${entry_px:.2f}")
+        return stop["id"]
+    except alpaca.BrokerError as e:
+        print(f"[broker] move_stop_to_breakeven {ticker} failed (soft): {e}")
+        return None
+
+
 def arm_trailing(position: dict) -> str | None:
     """Cancel the resting hard stop and submit a trailing_stop. Returns the new
     exit order id, or None if disabled / errored (caller keeps the old id)."""

@@ -70,6 +70,22 @@ DEFAULT_MAX_HOLD_DAYS = 45
 STOP_LOSS_PCT = -12.0
 SLIPPAGE_PCT = 0.5      # 0.5% worse than market on exit
 
+# Breakeven stop ratchet. Until this existed the hard stop sat at entry−12% from
+# fill until the +20% trail armed, so a name that ran to +15% and rolled over gave
+# back the ENTIRE move *and* booked a −12% loss — a 27-point round trip counted as
+# a full loser. Once peak gain clears BREAKEVEN_ARM_PCT the stop moves up to the
+# entry price, turning that path into a ~0% scratch.
+#
+# Why 12% and not 8%: the trigger must sit far enough above the stop that the
+# ratchet doesn't re-introduce the noise-ejection problem it's meant to fix. At
+# 12% the gap from trigger to the breakeven stop is 12 points — the SAME buffer
+# width as the original entry−12% stop — so a ratcheted position is no more
+# noise-sensitive than an un-ratcheted one, it just fails at 0 instead of −12.
+# A lower trigger (8%) would leave only an 8-point buffer and scratch winners out
+# on ordinary volatility. Supersedes nothing: the +20% trail still takes over
+# above it, and this only governs the window between +12% and the trail arming.
+BREAKEVEN_ARM_PCT = 12.0
+
 # Time-exit reprieve for slow, still-developing winners. In a ~63%-win, −12%-capped
 # book the profit lives in the right tail, and the forward-return analysis shows
 # winners peak in MONTH 2 — but the calendar time-exit cuts a GREEN name at the
@@ -178,6 +194,15 @@ def run_exits() -> None:
         peak_gain_pct = (new_peak - entry_price_aud) / entry_price_aud * 100
         trailing_active = was_active or peak_gain_pct >= TRAILING_STOP_ACTIVATE_PCT
 
+        # Breakeven ratchet state. Derived from the peak (which is persisted and
+        # only ratchets up), so no extra column is needed: `breakeven_armed` is
+        # recomputed every run and is therefore self-healing, while comparing it
+        # against the PREVIOUS stored peak identifies the single run on which it
+        # crosses — the one run the broker's resting stop needs to be moved.
+        prev_peak_gain_pct = (current_peak - entry_price_aud) / entry_price_aud * 100
+        breakeven_armed = peak_gain_pct >= BREAKEVEN_ARM_PCT
+        breakeven_just_armed = breakeven_armed and prev_peak_gain_pct < BREAKEVEN_ARM_PCT
+
         if new_peak != current_peak or trailing_active != was_active:
             update_paper_position_peak(pos["id"], new_peak, trailing_active)
             if trailing_active and not was_active:
@@ -205,6 +230,12 @@ def run_exits() -> None:
                 new_exit_id = broker_execution.arm_trailing(pos)
                 if new_exit_id:
                     update_paper_position_broker_exit(pos["id"], new_exit_id)
+            elif breakeven_just_armed and not trailing_active:
+                # Crossed +12% but not yet the trail — raise the resting −12% stop
+                # to the entry price. Soft-fails: on error the old stop stays put.
+                new_exit_id = broker_execution.move_stop_to_breakeven(pos)
+                if new_exit_id:
+                    update_paper_position_broker_exit(pos["id"], new_exit_id)
             elif days_held >= max_hold and not trailing_active and not reprieved:
                 sell_id = broker_execution.time_exit(pos)
                 if sell_id:
@@ -217,6 +248,9 @@ def run_exits() -> None:
                 if trailing_active
                 else f"green+climbing past {max_hold}d — time-exit reprieved (peak +{peak_gain_pct:.1f}%)"
                 if reprieved
+                else f"breakeven stop @ broker (peak +{peak_gain_pct:.1f}%), "
+                     f"{max_hold - days_held}d to {max_hold}d time limit"
+                if breakeven_armed
                 else f"{max_hold - days_held}d to {max_hold}d time limit"
             )
             print(f"[paper/exit] HOLD {ticker} (broker) — "
@@ -234,12 +268,18 @@ def run_exits() -> None:
                      and _time_exit_reprieved(days_held, max_hold, peak_gain_pct,
                                               exit_price_aud, new_peak))
         time_exit_due = days_held >= max_hold and not trailing_active and not reprieved
+        # Effective hard-stop level: entry (0%) once the breakeven ratchet is armed,
+        # otherwise the original −12%. Derived from the persisted peak each run, so
+        # it needs no stored flag and can't get stuck armed on a stale value.
+        effective_stop_pct = 0.0 if breakeven_armed else STOP_LOSS_PCT
 
         if trailing_active and exit_price_aud < trailing_stop_price:
             exit_reason = "trailing_stop"
             new_status = "closed_trail"
-        elif pnl_pct <= STOP_LOSS_PCT:
-            exit_reason = "stop_loss"
+        elif pnl_pct <= effective_stop_pct:
+            # Same 'closed_stop' status either way (it IS a stop); the reason
+            # distinguishes them so the analysis can score the ratchet separately.
+            exit_reason = "breakeven_stop" if breakeven_armed else "stop_loss"
             new_status = "closed_stop"
         elif time_exit_due:
             exit_reason = "time_exit"
@@ -252,6 +292,9 @@ def run_exits() -> None:
             elif reprieved:
                 trail_note = (f" | green+climbing past {max_hold}d — time-exit reprieved "
                               f"(peak +{peak_gain_pct:.1f}%, up to {max_hold + TIME_EXIT_REPRIEVE_DAYS}d)")
+            elif breakeven_armed:
+                trail_note = (f" | breakeven stop armed (peak +{peak_gain_pct:.1f}%), "
+                              f"{max_hold - days_held}d to {max_hold}d time limit")
             else:
                 trail_note = f" | {max_hold - days_held}d to {max_hold}d time limit"
             print(

@@ -128,6 +128,20 @@ def _check_time_exit_reprieve():
     # reprieve is bounded: past max_hold + REPRIEVE_DAYS -> back to time-exit
     assert r(91, 60, 15.0, 1.15, 1.15) is False
 check("exit._time_exit_reprieved (bounded green-climbing leash)", _check_time_exit_reprieve)
+def _check_breakeven_ratchet():
+    # The ratchet is derived from peak gain vs BREAKEVEN_ARM_PCT; assert the
+    # geometry that makes it safe rather than re-implementing the branch.
+    arm = pexit.BREAKEVEN_ARM_PCT
+    # Trigger must sit at least |STOP_LOSS_PCT| above breakeven, so the buffer
+    # from trigger down to the new stop is no tighter than the original stop.
+    assert arm >= abs(pexit.STOP_LOSS_PCT), "breakeven trigger tighter than the stop it replaces"
+    # ...and strictly below the trail arm, or the trail would always win first.
+    assert arm < pexit.TRAILING_STOP_ACTIVATE_PCT, "breakeven trigger must precede the trail arm"
+    # Effective stop selection: armed -> 0%, else the -12% hard stop.
+    for peak, expected in ((arm + 1, 0.0), (arm, 0.0), (arm - 0.1, pexit.STOP_LOSS_PCT)):
+        armed = peak >= arm
+        assert (0.0 if armed else pexit.STOP_LOSS_PCT) == expected
+check("exit breakeven ratchet geometry (buffer >= stop, below trail arm)", _check_breakeven_ratchet)
 
 # --- 4. Broker layer: pure logic + fail-soft when disabled ---------------------
 from broker import config as bcfg, alpaca as balpaca, execution as bexec, reconcile as brecon
