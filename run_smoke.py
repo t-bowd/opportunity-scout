@@ -142,6 +142,21 @@ def _check_breakeven_ratchet():
         armed = peak >= arm
         assert (0.0 if armed else pexit.STOP_LOSS_PCT) == expected
 check("exit breakeven ratchet geometry (buffer >= stop, below trail arm)", _check_breakeven_ratchet)
+def _check_single_share_ceiling():
+    sc = entry._single_share_ceiling
+    base = entry.LIVE_BASE_POSITION_AUD          # 200
+    # Paper: plain 2x base, budget/equity don't bind.
+    assert sc(entry.BASE_POSITION_AUD, False, 0.0, 0.0) == entry.BASE_POSITION_AUD * 2
+    # Live with ample cash+equity: the 2x stretch cap binds -> AMR/RSG (~$310-330) fit,
+    # a $500 name does not.
+    ample = sc(base, True, 5000.0, 20000.0)
+    assert ample == base * 2 == 400.0
+    assert 330.0 <= ample and 310.0 <= ample and 500.0 > ample
+    # Live hard limits bind ON TOP: thin cash caps it, and the single-name equity
+    # fraction caps it — a stretch can never breach either.
+    assert sc(base, True, 150.0, 20000.0) == 150.0                      # cash-bound
+    assert sc(base, True, 5000.0, 1000.0) == entry.LIVE_MAX_SINGLE_NAME_FRAC * 1000.0
+check("entry._single_share_ceiling (bounded stretch, live caps bind)", _check_single_share_ceiling)
 
 # --- 4. Broker layer: pure logic + fail-soft when disabled ---------------------
 from broker import config as bcfg, alpaca as balpaca, execution as bexec, reconcile as brecon

@@ -86,6 +86,14 @@ HIGH_CONVICTION_SCORE = 18      # picks at/above this may enter over the soft po
 # are held to BASE size, never the upsized conviction tiers.
 MIN_HISTORY_SESSIONS = 5
 
+# Whole-share stretch ceiling, as a multiple of the book's base position size. A
+# name priced above the base target would otherwise be skipped entirely (see the
+# `price_too_high_aud` branch in run_entries) — share price is an arbitrary filter
+# with no bearing on pick quality, and it was silently excluding the highest-scored
+# candidates. 2x keeps a stretched position bounded well inside the single-name
+# equity cap while unblocking the names that were being lost.
+SINGLE_SHARE_STRETCH_MULT = 2.0
+
 # --- Live (real-money) sizing profile — active ONLY when broker_config.is_live()
 # (i.e. the Alpaca base URL is the live host, not paper). Everything below is a
 # HARD limit, the opposite of the paper soft pool: the budget IS the broker's
@@ -282,6 +290,21 @@ def _live_target_size(budget_aud: float, equity_aud: float) -> float:
     live account can't over-concentrate on one high-scored name."""
     single_name_cap = LIVE_MAX_SINGLE_NAME_FRAC * equity_aud
     return min(LIVE_BASE_POSITION_AUD, budget_aud, single_name_cap)
+
+
+def _single_share_ceiling(base_aud: float, live: bool, remaining_budget: float,
+                          live_equity_aud: float) -> float:
+    """Pure: the highest share price we'll stretch to for a 1-share position.
+
+    Bounded at SINGLE_SHARE_STRETCH_MULT x base so one expensive name can't quietly
+    become a double-weight position. On the live book the hard limits bind on top:
+    never over the remaining cash, never over the single-name equity fraction.
+    Pure (no DB/network) so it can be smoke-tested — this sizes real money."""
+    ceiling = base_aud * SINGLE_SHARE_STRETCH_MULT
+    if live:
+        ceiling = min(ceiling, remaining_budget,
+                      LIVE_MAX_SINGLE_NAME_FRAC * live_equity_aud)
+    return ceiling
 
 
 def _business_days_between(start: date, end: date) -> int:
@@ -606,8 +629,27 @@ def run_entries(week_of: str | None = None) -> None:
                 continue
         quantity = int(target_aud / entry_price_aud)
         if quantity < 1:
-            skip(f"price_too_high_aud:{entry_price_aud:.2f}")
-            continue
+            # Whole-share stretch. int(target/price) is 0 for any name priced above
+            # the target, so a $330 stock was dropped outright as `price_too_high`
+            # even when it was the best-scored pick on the board (AMR and RSG, both
+            # 18/20, were skipped every run on share price alone — a criterion with
+            # nothing to do with quality). Take ONE share instead, when the price
+            # still lands inside a bounded stretch.
+            #
+            # Why not fractional shares, which would solve this cleanly: Alpaca
+            # supports fractional only with time_in_force=DAY and NO trailing stops,
+            # so our resting GTC hard stop would expire every afternoon and
+            # arm_trailing would break — trading the live book's whole risk
+            # architecture for a couple of names. Whole shares keep both intact.
+            base_aud = LIVE_BASE_POSITION_AUD if live else BASE_POSITION_AUD
+            ceiling = _single_share_ceiling(base_aud, live, remaining_budget,
+                                            live_equity_aud)
+            if entry_price_aud > ceiling:
+                skip(f"price_too_high_aud:{entry_price_aud:.2f}")
+                continue
+            quantity = 1
+            print(f"[paper/entry] {ticker} @ ${entry_price_aud:.2f} AUD over the "
+                  f"${base_aud:.0f} target — taking 1 share (stretch, cap ${ceiling:.0f})")
 
         # Book is full — surface this as a manual-assessment candidate and move on.
         # Deliberately mutates NO state (open_count / remaining_budget / sector
