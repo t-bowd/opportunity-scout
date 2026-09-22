@@ -76,15 +76,28 @@ SLIPPAGE_PCT = 0.5      # 0.5% worse than market on exit
 # a full loser. Once peak gain clears BREAKEVEN_ARM_PCT the stop moves up to the
 # entry price, turning that path into a ~0% scratch.
 #
-# Why 12% and not 8%: the trigger must sit far enough above the stop that the
-# ratchet doesn't re-introduce the noise-ejection problem it's meant to fix. At
-# 12% the gap from trigger to the breakeven stop is 12 points — the SAME buffer
-# width as the original entry−12% stop — so a ratcheted position is no more
-# noise-sensitive than an un-ratcheted one, it just fails at 0 instead of −12.
-# A lower trigger (8%) would leave only an 8-point buffer and scratch winners out
-# on ordinary volatility. Supersedes nothing: the +20% trail still takes over
-# above it, and this only governs the window between +12% and the trail arming.
-BREAKEVEN_ARM_PCT = 12.0
+# The trigger is the position's OWN stop distance, not a fixed number. That keeps
+# the invariant that makes this safe: the gap from trigger down to the breakeven
+# stop always equals the stop width the position was sized against, so a ratcheted
+# position is never more noise-sensitive than an un-ratcheted one — it just fails
+# at 0 instead of at −stop. A trigger tighter than the stop width would leave a
+# smaller buffer and scratch winners out on ordinary volatility. Supersedes
+# nothing: the +20% trail still takes over above it, and this only governs the
+# window between +stop and the trail arming.
+def _position_stop_pct(pos: dict) -> float:
+    """Positive stop distance for a position, in percent.
+
+    Reads the volatility-scaled distance stored at entry (migration 006). Legacy
+    rows — everything opened before per-position stops — are NULL and fall back to
+    the flat legacy stop, so the existing cohort keeps closing under exactly the
+    rules it was opened with."""
+    stored = pos.get("stop_loss_pct")
+    try:
+        if stored is not None and float(stored) > 0:
+            return float(stored)
+    except (TypeError, ValueError):
+        pass
+    return abs(STOP_LOSS_PCT)
 
 # Time-exit reprieve for slow, still-developing winners. In a ~63%-win, −12%-capped
 # book the profit lives in the right tail, and the forward-return analysis shows
@@ -200,8 +213,9 @@ def run_exits() -> None:
         # against the PREVIOUS stored peak identifies the single run on which it
         # crosses — the one run the broker's resting stop needs to be moved.
         prev_peak_gain_pct = (current_peak - entry_price_aud) / entry_price_aud * 100
-        breakeven_armed = peak_gain_pct >= BREAKEVEN_ARM_PCT
-        breakeven_just_armed = breakeven_armed and prev_peak_gain_pct < BREAKEVEN_ARM_PCT
+        stop_dist_pct = _position_stop_pct(pos)
+        breakeven_armed = peak_gain_pct >= stop_dist_pct
+        breakeven_just_armed = breakeven_armed and prev_peak_gain_pct < stop_dist_pct
 
         if new_peak != current_peak or trailing_active != was_active:
             update_paper_position_peak(pos["id"], new_peak, trailing_active)
@@ -269,9 +283,10 @@ def run_exits() -> None:
                                               exit_price_aud, new_peak))
         time_exit_due = days_held >= max_hold and not trailing_active and not reprieved
         # Effective hard-stop level: entry (0%) once the breakeven ratchet is armed,
-        # otherwise the original −12%. Derived from the persisted peak each run, so
-        # it needs no stored flag and can't get stuck armed on a stale value.
-        effective_stop_pct = 0.0 if breakeven_armed else STOP_LOSS_PCT
+        # otherwise this position's own volatility-scaled distance. Derived from the
+        # persisted peak each run, so it needs no stored flag and can't get stuck
+        # armed on a stale value.
+        effective_stop_pct = 0.0 if breakeven_armed else -stop_dist_pct
 
         if trailing_active and exit_price_aud < trailing_stop_price:
             exit_reason = "trailing_stop"

@@ -55,7 +55,8 @@ def account_cash_equity_usd() -> tuple[float, float] | None:
         return None
 
 
-def open_position(ticker: str, qty: int, opportunity_id: str) -> dict | None:
+def open_position(ticker: str, qty: int, opportunity_id: str,
+                  stop_pct: float | None = None) -> dict | None:
     """Submit a market BUY, wait for the fill, then rest the −12% hard stop.
 
     Three outcomes the caller must distinguish:
@@ -93,11 +94,15 @@ def open_position(ticker: str, qty: int, opportunity_id: str) -> dict | None:
             return DEFERRED
         fill_px = float(filled["filled_avg_price"])
         fill_qty = int(float(filled["filled_qty"]))
-        stop_px = fill_px * (1 - config.HARD_STOP_PCT / 100)
+        # Per-position stop distance (volatility-scaled at entry). Falls back to the
+        # flat legacy stop when the caller doesn't supply one, so nothing can open
+        # without a resting line under it.
+        stop_distance = stop_pct if stop_pct and stop_pct > 0 else config.HARD_STOP_PCT
+        stop_px = fill_px * (1 - stop_distance / 100)
         stop = cli.submit_stop_sell(
             ticker, fill_qty, stop_px, client_order_id=f"os-stop-{opportunity_id}")
         print(f"[broker] {ticker} FILLED {fill_qty} @ ${fill_px:.2f} USD, "
-              f"resting stop @ ${stop_px:.2f}")
+              f"resting stop @ ${stop_px:.2f} (−{stop_distance:.1f}%)")
         return {
             "fill_price_usd": fill_px,
             "filled_qty": fill_qty,

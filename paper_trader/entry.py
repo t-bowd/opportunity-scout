@@ -94,6 +94,53 @@ MIN_HISTORY_SESSIONS = 5
 # equity cap while unblocking the names that were being lost.
 SINGLE_SHARE_STRETCH_MULT = 2.0
 
+# --- Volatility-scaled stops + fixed-fractional sizing (live book) ------------
+# The flat −12% stop was the book's biggest structural flaw. Every name got the
+# same sell line regardless of how much it normally moves, so a calm regional bank
+# and a 5%-a-day biotech were both held to 12 points. On a 30–60 day hold that line
+# sits INSIDE ordinary noise for the volatile names: at ~3.5% daily vol the 60-day
+# sigma is ~27%, so 12% is ~0.45 sigma and a driftless walk touches it roughly two
+# thirds of the time. That is the mechanism behind six-for-six live stop-outs at a
+# median of 12 days, on signals whose edge only appears around day 30–60 — the
+# position was ejected before the thesis could play out.
+#
+# The fix is two coupled halves, and it only works as a pair:
+#   1. Stop distance scales with the name's own volatility (ATR), so the line sits
+#      outside normal wobble instead of inside it.
+#   2. Position size is derived FROM that distance, so every trade risks the same
+#      dollars. A wider stop buys a SMALLER position, not a bigger loss — which is
+#      what makes widening the stop affordable rather than reckless.
+# Both are computed per name at entry with no human input.
+ATR_PERIOD = 20
+# 5×ATR, not the 2–3× of short-term swing trading: this book HOLDS 30–60 days, and
+# noise compounds with time (sigma scales with the square root of the holding
+# period). A 3× multiplier is calibrated for a few days and would have put most
+# normal names on the 10% floor — i.e. a TIGHTER stop than today's flat 12%, the
+# exact opposite of the intent. At 5× a calm name lands ~10% and a name like the
+# ones being stopped out (ATR ~3.5%) gets ~17.5%, roughly halving the odds of a
+# noise ejection over a 12-day window.
+STOP_ATR_MULT = 5.0
+STOP_PCT_MIN = 10.0       # floor: a very calm name shouldn't get a spread-tight stop
+# Ceiling: caps the worst single loss on a wild name, but it ALSO has to stay below
+# exit.TRAILING_STOP_ACTIVATE_PCT (+20%). The breakeven ratchet triggers at the
+# position's own stop distance, so a stop wider than the trail arm would let the
+# trail arm first and make the ratchet dead code — and would leave the flat 8% trail
+# sitting inside that name's normal daily range, relocating the very noise-ejection
+# problem this change exists to fix. The invariant is asserted in run_smoke.py
+# (kept as separate constants rather than a cross-import; the test is the guard).
+# Names needing more than this are too volatile for the main book — that's the
+# sleeve's job — and are sized down accordingly here anyway.
+STOP_PCT_MAX = 18.0
+# Risk ~1.3% of equity per position. Chosen so a full LIVE_MAX_POSITIONS book
+# actually fits the account: at the current ~$1.7k equity and the stop distances
+# above, ten positions deploy ~$1.67k, leaving a small cash buffer. Raising this
+# would simply exhaust cash after 7–8 names and quietly under-diversify the book.
+LIVE_RISK_PER_TRADE_FRAC = 0.013
+# Risk-sizing deliberately produces SMALLER positions for wide-stop names — that is
+# the point — so the live floor is well below the paper book's MIN_TRADE_AUD, which
+# would otherwise reject exactly the volatile names we're trying to size correctly.
+LIVE_MIN_TRADE_AUD = 75.0
+
 # --- Live (real-money) sizing profile — active ONLY when broker_config.is_live()
 # (i.e. the Alpaca base URL is the live host, not paper). Everything below is a
 # HARD limit, the opposite of the paper soft pool: the budget IS the broker's
@@ -220,9 +267,12 @@ def _fetch_relative_volume(ticker: str) -> float | None:
         return None
 
 
-def _price_screen(ticker: str) -> tuple[bool, bool, int | None]:
+def _price_screen(ticker: str) -> tuple[bool, bool, int | None, float | None]:
     """
-    One 1-year fetch, three verdicts: (is_falling_knife, is_spac, n_sessions).
+    One 1-year fetch, four verdicts: (is_falling_knife, is_spac, n_sessions, atr_pct).
+
+    atr_pct rides along on this same request — the stop/sizing calculation needs
+    volatility and the bars are already here, so it costs no extra API call.
 
     n_sessions is the count of trading sessions of price history (None if the fetch
     failed) — used to hold fresh IPOs/new listings to base size.
@@ -242,20 +292,28 @@ def _price_screen(ticker: str) -> tuple[bool, bool, int | None]:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1y"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         data = resp.json()["chart"]["result"][0]
-        closes = [c for c in data["indicators"]["quote"][0].get("close", []) if c]
+        quote = data["indicators"]["quote"][0]
+        # Raw (unfiltered) bars for ATR — it needs high/low/close aligned per session,
+        # so it does its own row-wise filtering rather than reusing the closes list
+        # below, which drops gaps independently and would misalign the series.
+        atr_pct = _atr_pct(quote.get("high", []), quote.get("low", []),
+                           quote.get("close", []))
+        closes = [c for c in quote.get("close", []) if c]
         price = data["meta"].get("regularMarketPrice")
         n_sessions = len(closes) if closes else None
         if not closes or not price:
-            return False, is_spac, n_sessions
+            return False, is_spac, n_sessions, atr_pct
         hi, lo = max(closes), min(closes)
         from_high = (price - hi) / hi * 100
         above_low = (price - lo) / lo * 100
         near_low = above_low <= FALLING_KNIFE_ABOVE_LOW_PCT and from_high <= FALLING_KNIFE_MIN_DRAWDOWN_PCT
         deep_dd = from_high <= FALLING_KNIFE_DEEP_DD_PCT and above_low <= FALLING_KNIFE_DEEP_DD_ABOVE_LOW_PCT
         flat_at_ten = lo > 0 and (hi - lo) / lo < 0.08 and 9.0 <= price <= 11.0
-        return (near_low or deep_dd), (is_spac or flat_at_ten), n_sessions
+        return (near_low or deep_dd), (is_spac or flat_at_ten), n_sessions, atr_pct
     except Exception:
-        return False, is_spac, None  # fail open on the knife; keep the suffix SPAC check
+        # Fail open on the knife; keep the suffix SPAC check. atr_pct None means the
+        # sizing path falls back to the flat legacy stop rather than guessing.
+        return False, is_spac, None, None
 
 
 def _market_is_bearish(is_asx: bool) -> bool:
@@ -282,14 +340,53 @@ def _target_position_size(score: int) -> float:
     return BASE_POSITION_AUD
 
 
-def _live_target_size(budget_aud: float, equity_aud: float) -> float:
-    """Live (real-money) trade size in AUD: equal-weight base, but never more than
-    the remaining cash budget nor LIVE_MAX_SINGLE_NAME_FRAC of account equity.
-    Returns a size < MIN_TRADE_AUD when the budget can't support another position
-    (caller then skips). No conviction upsizing — deliberately flat, so a small
-    live account can't over-concentrate on one high-scored name."""
-    single_name_cap = LIVE_MAX_SINGLE_NAME_FRAC * equity_aud
-    return min(LIVE_BASE_POSITION_AUD, budget_aud, single_name_cap)
+def _atr_pct(highs: list, lows: list, closes: list,
+             period: int = ATR_PERIOD) -> float | None:
+    """Average True Range over `period` sessions, as a % of the latest close.
+
+    True Range per bar is max(high−low, |high−prev_close|, |prev_close−low|), so it
+    counts OVERNIGHT GAPS — which a close-to-close stdev misses and which is exactly
+    what a stop has to survive. Returns None when there aren't enough clean bars, so
+    the caller can fall back rather than size off a bad number. Pure — smoke-tested.
+    """
+    bars = [(h, l, c) for h, l, c in zip(highs or [], lows or [], closes or [])
+            if h is not None and l is not None and c is not None and c > 0]
+    if len(bars) < period + 1:
+        return None
+    trs = []
+    for i in range(1, len(bars)):
+        high, low, _ = bars[i]
+        prev_close = bars[i - 1][2]
+        trs.append(max(high - low, abs(high - prev_close), abs(prev_close - low)))
+    atr = sum(trs[-period:]) / period
+    last_close = bars[-1][2]
+    return atr / last_close * 100 if last_close > 0 else None
+
+
+def _stop_pct_for(atr_pct: float | None) -> float:
+    """Stop distance for a name as a POSITIVE percent, from its own volatility.
+
+    Falls back to the flat legacy stop when volatility is unknown, so a data
+    failure can never leave a position without a sensible line. Clamped at both
+    ends: a floor so a very calm name isn't stopped by spread, a ceiling so one
+    wild name can't produce an outsized single loss. Pure — smoke-tested."""
+    if atr_pct is None or atr_pct <= 0:
+        return float(broker_config.HARD_STOP_PCT)
+    return max(STOP_PCT_MIN, min(STOP_PCT_MAX, STOP_ATR_MULT * atr_pct))
+
+
+def _live_risk_sized(stop_pct: float, equity_aud: float, budget_aud: float) -> float:
+    """Live position size in AUD under fixed-fractional risk.
+
+    size × stop_distance is held constant, so every position risks the same dollars
+    no matter how volatile the name or what one share costs. A wider stop therefore
+    buys fewer dollars of stock rather than accepting a bigger loss. Still capped by
+    remaining cash and the single-name equity fraction. Pure — smoke-tested."""
+    if stop_pct <= 0 or equity_aud <= 0:
+        return 0.0
+    risk_aud = LIVE_RISK_PER_TRADE_FRAC * equity_aud
+    size = risk_aud / (stop_pct / 100.0)
+    return min(size, budget_aud, LIVE_MAX_SINGLE_NAME_FRAC * equity_aud)
 
 
 def _single_share_ceiling(base_aud: float, live: bool, remaining_budget: float,
@@ -544,7 +641,7 @@ def run_entries(week_of: str | None = None) -> None:
             continue
 
         pattern = opp.get("pattern", "")
-        knife, is_spac, n_sessions = _price_screen(ticker)
+        knife, is_spac, n_sessions, atr_pct = _price_screen(ticker)
 
         # 8a. SPAC / unit guard — never trade blank-check shells or units/warrants.
         # Hard block (no override): score-time filter only stops NEW opportunities,
@@ -598,15 +695,26 @@ def run_entries(week_of: str | None = None) -> None:
         # (score >= HIGH_CONVICTION_SCORE) may enter, sized at full conviction and
         # deliberately over the pool; marginal picks skip. MAX_POSITIONS (checked
         # above) is the hard ceiling either way.
+        # Stop distance for THIS name, from its own volatility. Computed here (not in
+        # exit.py) so the size below is derived from the same number that will be
+        # resting at the broker — one line, agreed on by sizing, the resting order and
+        # the exit poll, fixed for the life of the position.
+        stop_pct = _stop_pct_for(atr_pct)
+
         if live:
-            # Live real money: flat equal-weight base, hard-capped by remaining cash
-            # and the single-name equity fraction. No conviction upsizing, no
-            # over-budget override — when the cash can't fund another base position
-            # we simply stop. (No young-name upsizing to guard against here — size
-            # is already flat.)
-            target_aud = _live_target_size(remaining_budget, live_equity_aud)
-            if target_aud < MIN_TRADE_AUD:
+            # Live real money: fixed-fractional risk. Size falls OUT of the stop
+            # distance so every position risks ~the same dollars — a volatile name
+            # gets a wider stop and proportionally fewer dollars, not a bigger loss.
+            # Hard-capped by remaining cash and the single-name equity fraction; no
+            # conviction upsizing and no over-budget override.
+            if remaining_budget < LIVE_MIN_TRADE_AUD:
                 skip("live_budget_exhausted")
+                continue
+            target_aud = _live_risk_sized(stop_pct, live_equity_aud, remaining_budget)
+            if target_aud < LIVE_MIN_TRADE_AUD:
+                # Not a budget problem — the risk model wants a position too small to
+                # be worth the brokerage. Named distinctly so it's legible in the log.
+                skip(f"risk_sized_below_min:{target_aud:.0f}_stop{stop_pct:.0f}pct")
                 continue
         else:
             conviction_size = _target_position_size(score)
@@ -641,15 +749,18 @@ def run_entries(week_of: str | None = None) -> None:
             # so our resting GTC hard stop would expire every afternoon and
             # arm_trailing would break — trading the live book's whole risk
             # architecture for a couple of names. Whole shares keep both intact.
-            base_aud = LIVE_BASE_POSITION_AUD if live else BASE_POSITION_AUD
-            ceiling = _single_share_ceiling(base_aud, live, remaining_budget,
+            # Stretch is measured against what we INTENDED to spend on this name
+            # (the risk-sized target on live), so a wide-stop name that was
+            # deliberately sized small doesn't get stretched back up to a full
+            # position just because one share happens to cost that much.
+            ceiling = _single_share_ceiling(target_aud, live, remaining_budget,
                                             live_equity_aud)
             if entry_price_aud > ceiling:
                 skip(f"price_too_high_aud:{entry_price_aud:.2f}")
                 continue
             quantity = 1
             print(f"[paper/entry] {ticker} @ ${entry_price_aud:.2f} AUD over the "
-                  f"${base_aud:.0f} target — taking 1 share (stretch, cap ${ceiling:.0f})")
+                  f"${target_aud:.0f} target — taking 1 share (stretch, cap ${ceiling:.0f})")
 
         # Book is full — surface this as a manual-assessment candidate and move on.
         # Deliberately mutates NO state (open_count / remaining_budget / sector
@@ -681,7 +792,8 @@ def run_entries(week_of: str | None = None) -> None:
         # the simulator's poll-fill exactly as before (broker="sim").
         broker_fill = None
         if market == "US":
-            result = broker_execution.open_position(ticker, quantity, opp_id)
+            result = broker_execution.open_position(ticker, quantity, opp_id,
+                                                    stop_pct=stop_pct)
             if result is not None and result.get("deferred"):
                 # Broker is on but couldn't fill now (market closed / no fill).
                 # Skip entirely — falling back to a sim insert here would leave
@@ -706,6 +818,10 @@ def run_entries(week_of: str | None = None) -> None:
             "entry_date": date.today().isoformat(),
             "entry_week_of": week_of,
             "score_at_entry": score,
+            # The stop distance this position was sized against. Written once and
+            # never revised, so the exit poll and the broker's resting order always
+            # agree on the same line for the life of the position.
+            "stop_loss_pct": round(stop_pct, 3),
             "status": "open",
             "broker": "alpaca" if broker_fill else "sim",
             "broker_order_id": broker_fill["broker_order_id"] if broker_fill else None,

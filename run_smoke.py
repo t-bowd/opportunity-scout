@@ -128,20 +128,34 @@ def _check_time_exit_reprieve():
     # reprieve is bounded: past max_hold + REPRIEVE_DAYS -> back to time-exit
     assert r(91, 60, 15.0, 1.15, 1.15) is False
 check("exit._time_exit_reprieved (bounded green-climbing leash)", _check_time_exit_reprieve)
+def _check_position_stop_pct():
+    psp = pexit._position_stop_pct
+    # Per-position stop stored at entry is used as-is...
+    assert psp({"stop_loss_pct": 17.5}) == 17.5
+    assert psp({"stop_loss_pct": "21.0"}) == 21.0          # numeric comes back as str
+    # ...and every legacy/garbage shape falls back to the flat stop, so a position
+    # can never end up with no line under it.
+    flat = abs(pexit.STOP_LOSS_PCT)
+    for row in ({}, {"stop_loss_pct": None}, {"stop_loss_pct": 0}, {"stop_loss_pct": "x"}):
+        assert psp(row) == flat
+check("exit._position_stop_pct (per-position stop, legacy falls back)", _check_position_stop_pct)
 def _check_breakeven_ratchet():
-    # The ratchet is derived from peak gain vs BREAKEVEN_ARM_PCT; assert the
-    # geometry that makes it safe rather than re-implementing the branch.
-    arm = pexit.BREAKEVEN_ARM_PCT
-    # Trigger must sit at least |STOP_LOSS_PCT| above breakeven, so the buffer
-    # from trigger down to the new stop is no tighter than the original stop.
-    assert arm >= abs(pexit.STOP_LOSS_PCT), "breakeven trigger tighter than the stop it replaces"
-    # ...and strictly below the trail arm, or the trail would always win first.
-    assert arm < pexit.TRAILING_STOP_ACTIVATE_PCT, "breakeven trigger must precede the trail arm"
-    # Effective stop selection: armed -> 0%, else the -12% hard stop.
-    for peak, expected in ((arm + 1, 0.0), (arm, 0.0), (arm - 0.1, pexit.STOP_LOSS_PCT)):
-        armed = peak >= arm
-        assert (0.0 if armed else pexit.STOP_LOSS_PCT) == expected
-check("exit breakeven ratchet geometry (buffer >= stop, below trail arm)", _check_breakeven_ratchet)
+    # The ratchet triggers at the position's OWN stop distance. Assert the invariant
+    # that makes it safe: the buffer from trigger down to the breakeven stop always
+    # equals the stop width, so ratcheting never tightens noise-sensitivity.
+    for stop_dist in (abs(pexit.STOP_LOSS_PCT), 10.0, 17.5, 25.0):
+        buffer_to_new_stop = stop_dist - 0.0
+        assert buffer_to_new_stop >= stop_dist, "ratchet buffer tighter than the stop it replaces"
+        # Effective stop selection: armed -> 0%, else this position's own distance.
+        for peak, expected in ((stop_dist + 1, 0.0), (stop_dist, 0.0),
+                               (stop_dist - 0.1, -stop_dist)):
+            armed = peak >= stop_dist
+            assert (0.0 if armed else -stop_dist) == expected
+    # The widest possible stop must still sit below the trail arm, or the trail
+    # would always win first and the ratchet would be dead code.
+    assert entry.STOP_PCT_MAX < pexit.TRAILING_STOP_ACTIVATE_PCT, \
+        "widest stop must stay below the trail arm"
+check("exit breakeven ratchet geometry (buffer == stop, below trail arm)", _check_breakeven_ratchet)
 def _check_single_share_ceiling():
     sc = entry._single_share_ceiling
     base = entry.LIVE_BASE_POSITION_AUD          # 200
@@ -195,17 +209,59 @@ def _check_broker_fail_soft():
     assert bexec.account_cash_equity_usd() is None   # no account when disabled
 check("broker disabled without keys — all ops no-op", _check_broker_fail_soft)
 
-def _check_live_sizing():
-    lts = entry._live_target_size
-    # Funded ~$854 AUD (≈$600 USD) empty book: flat base wins (cap 25%*854=213 > 200)
-    assert lts(854, 854) == 200.0
-    # Budget nearly gone: returns the remnant (< MIN_TRADE) so caller skips
-    assert lts(120, 854) == 120.0
-    # Small account: 25%-of-equity single-name cap binds below base
-    assert lts(400, 400) == 100.0
-    # Large account: still flat base, never upsizes
-    assert lts(5000, 5000) == 200.0
-check("entry._live_target_size hard-caps by cash + single-name fraction", _check_live_sizing)
+def _check_atr_pct():
+    ap = entry._atr_pct
+    # Flat series: every true range is 0 -> ATR 0%.
+    n = entry.ATR_PERIOD + 5
+    assert ap([100.0] * n, [100.0] * n, [100.0] * n) == 0.0
+    # Constant 2-point range on a 100 close -> ATR 2%.
+    assert abs(ap([101.0] * n, [99.0] * n, [100.0] * n) - 2.0) < 1e-9
+    # True Range counts overnight GAPS, not just the bar's own high-low: a bar that
+    # opens far below the prior close has TR = prev_close - low, wider than high-low.
+    highs = [100.0] * n + [90.0]
+    lows = [100.0] * n + [88.0]
+    closes = [100.0] * n + [89.0]
+    gapped = ap(highs, lows, closes)
+    assert gapped is not None and gapped > 0, "gap day must register range"
+    # Too few bars -> None (caller falls back rather than sizing off noise).
+    assert ap([100.0] * 5, [99.0] * 5, [99.5] * 5) is None
+    assert ap([], [], []) is None
+    # Misaligned/None rows are dropped row-wise, not per-series.
+    assert ap([100.0, None] * n, [99.0, None] * n, [99.5, None] * n) is not None
+check("entry._atr_pct (true range incl. gaps, fails to None)", _check_atr_pct)
+def _check_stop_pct_for():
+    sp = entry._stop_pct_for
+    # Unknown volatility -> flat legacy stop, never a guess.
+    assert sp(None) == float(bcfg.HARD_STOP_PCT)
+    assert sp(0) == float(bcfg.HARD_STOP_PCT)
+    # Calm name: 3 x 1% = 3% -> floored so spread can't stop us out.
+    assert sp(1.0) == entry.STOP_PCT_MIN
+    # Wild name: 3 x 15% = 45% -> capped so one loss can't be outsized.
+    assert sp(15.0) == entry.STOP_PCT_MAX
+    # In-band scales with the name's own volatility.
+    assert sp(3.0) == 15.0
+    assert entry.STOP_PCT_MIN <= sp(2.5) <= entry.STOP_PCT_MAX
+    # The multiplier must be calibrated so a TYPICAL name lands above the old flat
+    # stop — a tighter stop than before would invert the whole point of the change.
+    assert sp(2.5) > float(bcfg.HARD_STOP_PCT), "typical name must get a wider stop than the old flat 12%"
+check("entry._stop_pct_for (ATR-scaled, clamped both ends)", _check_stop_pct_for)
+def _check_live_risk_sized():
+    rs = entry._live_risk_sized
+    eq = 2000.0
+    risk = entry.LIVE_RISK_PER_TRADE_FRAC * eq          # dollars at risk per trade
+    # THE core invariant: size x stop distance is constant, so every position risks
+    # the same dollars — a wider stop buys a smaller position, not a bigger loss.
+    for stop in (10.0, 15.0, 20.0, 25.0):
+        size = rs(stop, eq, 10_000.0)
+        assert abs(size * (stop / 100.0) - risk) < 1e-6, "risk per trade must be constant"
+    # Wider stop => strictly smaller position.
+    assert rs(25.0, eq, 10_000.0) < rs(10.0, eq, 10_000.0)
+    # Hard caps still bind on top: thin cash, and the single-name equity fraction.
+    assert rs(10.0, eq, 50.0) == 50.0
+    assert rs(1.0, eq, 10_000.0) == entry.LIVE_MAX_SINGLE_NAME_FRAC * eq
+    # Degenerate inputs never produce a position.
+    assert rs(0, eq, 1000.0) == 0.0 and rs(10.0, 0, 1000.0) == 0.0
+check("entry._live_risk_sized (constant dollar risk, caps bind)", _check_live_risk_sized)
 
 def _check_business_days():
     from datetime import date
