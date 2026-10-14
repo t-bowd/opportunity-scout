@@ -104,6 +104,14 @@ check("good biotech passes", passes_gates(bio, held, vc, TODAY)[0])
 check("not climbing rejected", not passes_gates({**bio, "climbing": False}, held, vc, TODAY)[0])
 check("cap over $500M rejected", not passes_gates({**bio, "market_cap": 600e6}, held, vc, TODAY)[0])
 check("biotech past-dated rejected", not passes_gates({**bio, "catalyst_date": "2026-06-01"}, held, vc, TODAY)[0])
+# Churn guard: a catalyst inside the pre-catalyst exit window would be bought and
+# immediately sold again (ACW.AX closed 4 days running). TODAY is Thu 2026-07-16,
+# so 07-17 is 1 business day out and 07-20 is 2 — both must be refused; 07-21 (3) is fine.
+check("catalyst 1bd away rejected (churn guard)",
+      passes_gates({**bio, "catalyst_date": "2026-07-17"}, held, vc, TODAY)[1] == "catalyst_too_close")
+check("catalyst 2bd away rejected (churn guard)",
+      not passes_gates({**bio, "catalyst_date": "2026-07-20"}, held, vc, TODAY)[0])
+check("catalyst 3bd away still passes", passes_gates({**bio, "catalyst_date": "2026-07-21"}, held, vc, TODAY)[0])
 check("already held rejected", not passes_gates(bio, {"AKBA"}, vc, TODAY)[0])
 check("under vertical cap passes", passes_gates(bio, held, {"biotech": MAX_PER_VERTICAL - 1}, TODAY)[0])
 check("vertical cap full rejected", not passes_gates(bio, held, {"biotech": MAX_PER_VERTICAL}, TODAY)[0])

@@ -1,0 +1,26 @@
+name: Small-Cap Entry-Quality Analysis
+
+# On-demand only — this is a research read, not part of the trading loop, and it
+# changes nothing. Run it when there are enough fresh closes to be worth reading.
+on:
+  workflow_dispatch:
+
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sleeve entry-quality analysis
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python run_smallcap_analysis.py

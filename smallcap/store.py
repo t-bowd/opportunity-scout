@@ -26,6 +26,24 @@ def get_closed_positions(limit: int = 500) -> list[dict]:
     )
 
 
+def get_momentum_for_positions(position_ids: list[str]) -> list[dict]:
+    """All momentum observations for the given positions, OLDEST FIRST.
+
+    Callers pick the row they need — the entry-quality analysis takes the earliest
+    one as the entry-day reading. Returns [] on an empty id list rather than issuing
+    a query that would match everything."""
+    if not position_ids:
+        return []
+    db = get_client()
+    return (
+        db.table("smallcap_momentum")
+        .select("position_id, obs_date, climbing, ret_20d, peak_gain_pct")
+        .in_("position_id", position_ids)
+        .order("obs_date")
+        .execute().data
+    )
+
+
 def insert_position(pos: dict) -> str:
     db = get_client()
     return db.table("smallcap_positions").insert(pos).execute().data[0]["id"]

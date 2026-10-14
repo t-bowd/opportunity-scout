@@ -15,7 +15,9 @@ from datetime import date
 
 from smallcap import store
 from smallcap.screen import run_screen
-from smallcap.exit import parse_catalyst_date
+from smallcap.exit import (
+    parse_catalyst_date, business_days_until, PRE_CATALYST_EXIT_DAYS,
+)
 from smallcap.pricing import fetch_fx_rate, to_aud
 
 # --- Parameters (SPEC, DECIDED 2026-07-16) ---
@@ -55,6 +57,16 @@ def passes_gates(cand: dict, held_tickers: set[str], vertical_counts: dict[str, 
     if vert == "biotech":
         if cat is None or cat < today:
             return False, "biotech_not_future_dated"
+        # Never buy a name INTO its own immediate exit. The pre-catalyst rule closes
+        # any dated biotech within PRE_CATALYST_EXIT_DAYS business days of its
+        # readout, so a name already inside that window gets bought and sold straight
+        # back out on the next run — a churn loop paying 2% entry slippage per cycle
+        # for nothing. Observed live: ACW.AX closed on four consecutive days
+        # (2026-09-29 → 10-02); the first was the real +38.8% winner, the next three
+        # were phantom round-trips costing −$16.25 and corrupting the win rate with
+        # trades that should never have opened.
+        if business_days_until(cat, today) <= PRE_CATALYST_EXIT_DAYS:
+            return False, "catalyst_too_close"
     elif vert == "asx_ann":
         if cat is None or (today - cat).days > ASX_ANN_MAX_AGE_DAYS or cat > today:
             return False, "asx_ann_stale"
