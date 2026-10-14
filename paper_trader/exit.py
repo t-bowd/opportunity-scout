@@ -256,6 +256,14 @@ def run_exits() -> None:
                     update_paper_position_broker_exit(pos["id"], sell_id)
                     print(f"[paper/exit] {ticker} — time exit sent to broker "
                           f"(fills intraday, records on next reconcile)")
+                else:
+                    # Say so loudly. Previously a failed time exit printed nothing at
+                    # all here and the position simply vanished from the log — which
+                    # is how BWFG sat wedged past its limit unnoticed. The broker layer
+                    # logs the cause; this makes the STUCK POSITION itself visible.
+                    print(f"[paper/exit] ⚠️ {ticker} (broker) — {days_held}d, "
+                          f"{pnl_pct:+.1f}% | PAST {max_hold}d LIMIT but the time exit "
+                          f"did not submit (see broker error above); still open")
                 continue
             armed_note = (
                 f"trailing stop live @ broker (peak +{peak_gain_pct:.1f}%)"

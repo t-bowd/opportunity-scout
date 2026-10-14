@@ -14,6 +14,7 @@ resting exit order, so reconciliation only has to watch that one id.
 from __future__ import annotations
 
 import time
+from datetime import date
 
 from broker import alpaca, config
 
@@ -167,7 +168,16 @@ def arm_trailing(position: dict) -> str | None:
 
 def time_exit(position: dict) -> str | None:
     """Cancel the resting exit and market-sell (calendar exit). Returns the sell
-    order id, or None if disabled / errored."""
+    order id, or None if disabled / errored.
+
+    Unlike arm_trailing and move_stop_to_breakeven — which fire exactly once, on the
+    run a threshold is crossed — this is RETRIED every run for as long as the position
+    sits past its time limit. So its client_order_id must differ per attempt: a
+    deterministic id meant the first attempt consumed it and Alpaca rejected every
+    later one with 422 "client_order_id must be unique", wedging the position open
+    forever with no way to self-heal (observed on BWFG from 2026-10-11). Stamping the
+    date gives one clean attempt per day, and the prior order is cancelled first, so
+    there is no double-sell risk."""
     cli = alpaca.client()
     if cli is None:
         return None
@@ -177,7 +187,8 @@ def time_exit(position: dict) -> str | None:
         if position.get("broker_exit_order_id"):
             cli.cancel_order(position["broker_exit_order_id"])
         sell = cli.submit_market_sell(
-            ticker, qty, client_order_id=f"os-time-{position['id']}")
+            ticker, qty,
+            client_order_id=f"os-time-{position['id']}-{date.today().isoformat()}")
         print(f"[broker] {ticker} time exit — market sell submitted")
         return sell["id"]
     except alpaca.BrokerError as e:
