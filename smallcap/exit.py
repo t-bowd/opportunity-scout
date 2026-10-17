@@ -19,6 +19,21 @@ from smallcap.pricing import current_price_native, to_aud
 
 # --- Parameters (SPEC §5, DECIDED 2026-07-16) ---
 PRE_CATALYST_EXIT_DAYS = 2       # exit N business days before a dated readout
+
+# Momentum-invalidation exit (added 2026-10-17, from run_smallcap_analysis.py).
+# The exit-reason table showed the sleeve makes money when it exits on a SCHEDULE
+# and loses when it exits on pain: pre_catalyst +$26.84 over 7 trades, against
+# disaster_stop −$188.96 over 5 (avg −39.6%) and time_limit −$111.36 over 9. The
+# −35% disaster stop wasn't protecting anything — it licensed a loser to run to
+# −40%. Meanwhile `climbing` had been recorded daily for two months and never fed
+# a decision.
+#
+# Backtested over 18 positions with capture from entry: selling when momentum
+# breaks would have turned −$443 into −$264, saving ~$179 (~40% of the loss).
+# Requiring TWO consecutive broken days rather than one costs only ~$6 of that and
+# buys real robustness — every lesson in this project has been that a single
+# observation is noise. 3 days is strictly worse (same 14 exits, $9 less saved).
+MOMENTUM_EXIT_DAYS = 2
 TRAIL_ARM_PCT = 30.0             # arm the trail once up +30%
 DISASTER_STOP_PCT = -35.0        # "thesis broken", not risk management
 TIME_LIMIT_DAYS = 45             # non-dated (asx_ann) positions only
@@ -68,7 +83,27 @@ def business_days_until(target: date, today: date) -> int:
     return n
 
 
-def evaluate(pos: dict, price_aud: float, today: date) -> dict:
+def broken_streak(history: list[dict], today_m: dict | None) -> int:
+    """Consecutive most-recent observations where momentum was broken, counting
+    today's fresh verdict first. `history` is this position's stored observations,
+    OLDEST FIRST, excluding today.
+
+    Unknown (None) ends the streak: we act only on positive evidence that momentum
+    is gone, never on a failed price fetch. Pure — smoke-tested, because it gates
+    an exit."""
+    if not today_m or today_m.get("climbing") is None or today_m["climbing"]:
+        return 0
+    streak = 1
+    for row in reversed(history):
+        if row.get("climbing") is False:
+            streak += 1
+        else:
+            break   # climbing again, or unknown — either way the run is over
+    return streak
+
+
+def evaluate(pos: dict, price_aud: float, today: date,
+             momentum_broken_days: int = 0) -> dict:
     """
     Pure exit decision for one position at a given AUD price. Returns:
       {action: 'hold'|'exit', reason, pnl_pct, new_peak_aud, trail_active}
@@ -109,12 +144,26 @@ def evaluate(pos: dict, price_aud: float, today: date) -> dict:
             result.update(action="exit", reason=f"trailing_stop_{trail_pct:.0f}pct")
             return result
 
-    # 3. Disaster stop — thesis broken.
+    # 3. Momentum invalidation — the entry thesis was "a catalyst on a name that is
+    # ALREADY climbing", so once it stops climbing the thesis is gone. Sits BEFORE
+    # the disaster stop deliberately: the whole point is to cut a fader here, around
+    # −10/−20%, instead of riding it to −35% (and realising −40% on the poll-based
+    # gap-through). Requires the position to be UNDERWATER — a green position that
+    # wobbles is noise, and the underwater condition ring-fences winners by
+    # construction, which matters because the backtest sample contained none
+    # (capture began after CRDL and ACW opened). Protecting winners that way cost
+    # only ~5% of the measured saving, so the benefit is genuinely from cutting
+    # losers early rather than from clipping everything.
+    if momentum_broken_days >= MOMENTUM_EXIT_DAYS and pnl_pct < 0:
+        result.update(action="exit", reason="momentum_broken")
+        return result
+
+    # 4. Disaster stop — thesis broken.
     if pnl_pct <= DISASTER_STOP_PCT:
         result.update(action="exit", reason="disaster_stop")
         return result
 
-    # 4. Time limit — for non-dated (asx_ann / defense) positions whose catalyst
+    # 5. Time limit — for non-dated (asx_ann / defense) positions whose catalyst
     # has already fired and which never ran.
     if not is_dated:
         held = (today - _parse_date(pos["entry_date"])).days
@@ -170,6 +219,19 @@ def run_exits() -> None:
         return
 
     fx_note = ""
+    # Stored momentum history for the whole book in ONE query, so the invalidation
+    # exit can count consecutive broken days. Today's row is excluded: a same-day
+    # re-run would already have written it (record_momentum upserts), and counting
+    # it alongside today's fresh verdict would double-count the streak.
+    today_iso = today.isoformat()
+    history: dict[str, list[dict]] = {}
+    try:
+        for row in store.get_momentum_for_positions([p["id"] for p in positions]):
+            if str(row.get("obs_date"))[:10] != today_iso:
+                history.setdefault(row["position_id"], []).append(row)
+    except Exception as e:   # never let instrumentation break the exit run
+        print(f"[smallcap/exit] momentum history unavailable (non-fatal): {e}")
+
     momentum_rows: list[dict] = []   # per-position daily observations to persist
     for pos in positions:
         tkr = pos["ticker"]
@@ -178,12 +240,15 @@ def run_exits() -> None:
             print(f"[smallcap/exit] {tkr} price unavailable — holding")
             continue
         price_aud = to_aud(price_native, pos["exchange"], float(pos.get("fx_rate") or 0.65))
-        d = evaluate(pos, price_aud, today)
-        held = (today - _parse_date(pos["entry_date"])).days
 
-        # Momentum verdict — fetched once, used for both the printed note and the
-        # persisted record. Observation only; never feeds the exit decision above.
+        # Momentum verdict — fetched once, used for the exit decision, the printed
+        # note and the persisted record. No longer observation-only: as of
+        # 2026-10-17 it feeds the momentum-invalidation exit below.
         m = _safe_momentum(tkr)
+        broken_days = broken_streak(history.get(pos["id"], []), m)
+
+        d = evaluate(pos, price_aud, today, momentum_broken_days=broken_days)
+        held = (today - _parse_date(pos["entry_date"])).days
         entry = float(pos["entry_price_aud"])
         momentum_rows.append({
             "position_id": pos["id"],

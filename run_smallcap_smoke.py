@@ -9,7 +9,7 @@ from datetime import date
 
 from smallcap.exit import (
     trail_pct_for, parse_catalyst_date, business_days_until, evaluate,
-    TRAIL_ARM_PCT, DISASTER_STOP_PCT,
+    broken_streak, TRAIL_ARM_PCT, DISASTER_STOP_PCT, MOMENTUM_EXIT_DAYS,
 )
 from smallcap.entry import passes_gates, MAX_PER_VERTICAL
 
@@ -94,6 +94,40 @@ check("time_limit fires for asx_ann after 45d", c["reason"] == "time_limit" and 
 c = evaluate(_pos(vertical="biotech", catalyst_date="2026-11-01", entry_date="2026-05-01",
                   peak_price_aud=1.05), price_aud=1.0, today=TODAY)
 check("no time_limit for dated biotech", c["action"] == "hold")
+
+print("broken_streak (momentum-invalidation input):")
+_up, _dn, _unk = {"climbing": True}, {"climbing": False}, {"climbing": None}
+check("climbing today -> 0", broken_streak([_dn, _dn], _up) == 0)
+check("no verdict today -> 0 (never act on missing data)", broken_streak([_dn, _dn], None) == 0)
+check("unknown today -> 0", broken_streak([_dn, _dn], _unk) == 0)
+check("broken today only -> 1", broken_streak([_up, _up], _dn) == 1)
+check("broken today + yesterday -> 2", broken_streak([_up, _dn], _dn) == 2)
+check("counts only the TRAILING run", broken_streak([_dn, _up, _dn], _dn) == 2)
+check("unknown in history ends the run", broken_streak([_dn, _unk, _dn], _dn) == 2)
+check("empty history -> 1 on a broken today", broken_streak([], _dn) == 1)
+
+print("evaluate — momentum-invalidation exit:")
+# Underwater + momentum broken for the required run -> exit BEFORE the disaster stop.
+c = evaluate(_pos(catalyst_date="2026-11-01", peak_price_aud=1.1), price_aud=0.85,
+             today=TODAY, momentum_broken_days=MOMENTUM_EXIT_DAYS)
+check("underwater + broken -> momentum_broken",
+      c["reason"] == "momentum_broken" and c["action"] == "exit")
+# GREEN names are ring-fenced however broken momentum looks — this is what protects
+# a future CRDL, and the backtest sample contained no winners to prove it on.
+c = evaluate(_pos(catalyst_date="2026-11-01", peak_price_aud=1.3), price_aud=1.2,
+             today=TODAY, momentum_broken_days=MOMENTUM_EXIT_DAYS + 5)
+check("green + broken -> HOLD (winners ring-fenced)", c["action"] == "hold")
+# One broken day is not enough — a single observation is noise.
+c = evaluate(_pos(catalyst_date="2026-11-01", peak_price_aud=1.1), price_aud=0.85,
+             today=TODAY, momentum_broken_days=MOMENTUM_EXIT_DAYS - 1)
+check("underwater + 1 broken day -> HOLD", c["action"] == "hold")
+# Precedence: the pre-catalyst edge still outranks it.
+c = evaluate(_pos(catalyst_date="2026-07-17", peak_price_aud=1.1), price_aud=0.85,
+             today=TODAY, momentum_broken_days=MOMENTUM_EXIT_DAYS)
+check("pre_catalyst still outranks momentum_broken", c["reason"] == "pre_catalyst")
+# Default (no momentum passed) must not change existing behaviour.
+c = evaluate(_pos(catalyst_date="2026-11-01", peak_price_aud=1.1), price_aud=0.9, today=TODAY)
+check("no momentum arg -> unchanged behaviour", c["action"] == "hold")
 
 print("passes_gates:")
 held: set[str] = set()
