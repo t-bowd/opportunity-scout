@@ -139,6 +139,16 @@ def _check_position_stop_pct():
     for row in ({}, {"stop_loss_pct": None}, {"stop_loss_pct": 0}, {"stop_loss_pct": "x"}):
         assert psp(row) == flat
 check("exit._position_stop_pct (per-position stop, legacy falls back)", _check_position_stop_pct)
+def _check_paper_momentum_instrumentation():
+    # Must never raise, whatever the ticker or network does — it runs inside the
+    # real-money exit loop and an exception there would leave positions unmanaged.
+    assert pexit._safe_position_momentum("") is None
+    assert pexit._safe_position_momentum("$$NOT_A_TICKER$$") is None
+    # Empty batch is a no-op rather than a malformed write.
+    from db import client as dbc
+    assert dbc.record_paper_momentum([]) is None
+check("exit paper momentum capture is fail-soft + no-ops empty",
+      _check_paper_momentum_instrumentation)
 def _check_breakeven_ratchet():
     # The ratchet triggers at the position's OWN stop distance. Assert the invariant
     # that makes it safe: the buffer from trigger down to the breakeven stop always

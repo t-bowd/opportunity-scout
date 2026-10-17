@@ -29,6 +29,7 @@ from db.client import (
     update_paper_position_peak,
     update_paper_position_broker_exit,
     auto_fill_feedback_exit,
+    record_paper_momentum,
 )
 from paper_trader.notify import notify_closed
 from broker import execution as broker_execution, config as broker_config
@@ -139,6 +140,52 @@ def _fetch_price(ticker: str) -> float | None:
         return None
 
 
+def _position_momentum(ticker: str) -> dict | None:
+    """Climbing verdict + raw momentum for a held name. None if data is unavailable.
+
+    Deliberately MIRRORS smallcap/momentum.py's definition (up over ~a month, above
+    the 50-day average, not pinned to the 52-week low) so the two books' analyses
+    are directly comparable — but it is DUPLICATED rather than imported, keeping the
+    sleeve walled off exactly as pricing.py already is. A sleeve tweak must never
+    silently change what the real-money book records.
+
+    Instrumentation only: the main book has no momentum-based exit, and this feeds
+    no decision. `ret_20d` is the definition-free measure and the one that matters
+    for comparing books later; `climbing` is the composite judgement.
+    """
+    try:
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+               "?interval=1d&range=1y")
+        resp = requests.get(url, headers={"User-Agent": "OpportunityScout"}, timeout=10)
+        data = resp.json()["chart"]["result"][0]
+        closes = [c for c in data["indicators"]["quote"][0].get("close", []) if c]
+        price = data["meta"].get("regularMarketPrice")
+    except Exception:
+        return None
+    if not closes or not price or len(closes) < 25:
+        return None
+    hi, lo = max(closes), min(closes)
+    sma50 = sum(closes[-50:]) / len(closes[-50:])
+    ref_20 = closes[-21] if len(closes) > 21 else closes[0]
+    ref_5 = closes[-6] if len(closes) > 6 else closes[0]
+    ret_20d = (price - ref_20) / ref_20 * 100 if ref_20 else 0.0
+    ret_5d = (price - ref_5) / ref_5 * 100 if ref_5 else 0.0
+    above_low = (price - lo) / lo * 100 if lo else 0.0
+    return {
+        "climbing": bool(ret_20d > 0 and price >= sma50 and above_low > 15),
+        "ret_20d": round(ret_20d, 1),
+        "ret_5d": round(ret_5d, 1),
+    }
+
+
+def _safe_position_momentum(ticker: str) -> dict | None:
+    """_position_momentum but never raises — instrumentation must not break exits."""
+    try:
+        return _position_momentum(ticker)
+    except Exception:
+        return None
+
+
 def _fetch_fx_rate() -> float:
     try:
         url = (
@@ -163,6 +210,7 @@ def run_exits() -> None:
     today = date.today()
     fx_rate = _fetch_fx_rate()
     now_iso = datetime.now(timezone.utc).isoformat()
+    momentum_rows: list[dict] = []   # instrumentation only — see record_paper_momentum
 
     for pos in positions:
         ticker = pos["ticker"]
@@ -216,6 +264,23 @@ def run_exits() -> None:
         stop_dist_pct = _position_stop_pct(pos)
         breakeven_armed = peak_gain_pct >= stop_dist_pct
         breakeven_just_armed = breakeven_armed and prev_peak_gain_pct < stop_dist_pct
+
+        # --- Momentum capture (instrumentation only, migration 007) -------------
+        # Recorded here, BEFORE the broker branch returns, so broker and sim
+        # positions are both captured. Feeds no decision in this book: it exists so
+        # the same entry-quality / exit-timing questions the sleeve could answer
+        # from two months of recording can eventually be asked of real money.
+        _m = _safe_position_momentum(ticker)
+        momentum_rows.append({
+            "position_id": pos["id"],
+            "ticker": ticker,
+            "obs_date": today.isoformat(),
+            "climbing": _m["climbing"] if _m else None,
+            "ret_20d": _m["ret_20d"] if _m else None,
+            "ret_5d": _m["ret_5d"] if _m else None,
+            "pnl_pct": round(pnl_pct, 2),
+            "peak_gain_pct": round(peak_gain_pct, 2),
+        })
 
         if new_peak != current_peak or trailing_active != was_active:
             update_paper_position_peak(pos["id"], new_peak, trailing_active)
@@ -343,3 +408,12 @@ def run_exits() -> None:
             f"{pnl_pct:+.1f}% / ${pnl_aud:+.2f} AUD after {days_held}d"
         )
         notify_closed(ticker, exit_reason, pnl_aud, pnl_pct, days_held)
+
+    # Persist the day's momentum observations. Batched (one write for the book) and
+    # fail-soft: this is instrumentation, and it must never be able to break an exit
+    # run or leave a real-money position unmanaged. Prints until migration 007 is
+    # applied, then goes quiet.
+    try:
+        record_paper_momentum(momentum_rows)
+    except Exception as e:
+        print(f"[paper/exit] momentum capture failed (non-fatal): {e}")

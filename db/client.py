@@ -334,6 +334,24 @@ def upsert_paper_snapshot(snap: dict) -> None:
     db.table("paper_portfolio_snapshots").upsert(snap, on_conflict="snapshot_date").execute()
 
 
+def record_paper_momentum(rows: list[dict]) -> None:
+    """
+    Persist per-position daily momentum observations for the MAIN book
+    (paper_position_momentum, migration 007). Upsert on (position_id, obs_date) so
+    a same-day re-run — the daily fires three times — overwrites rather than
+    duplicating. No-op on an empty list.
+
+    Instrumentation only: nothing reads this yet. It mirrors the sleeve's
+    smallcap_momentum so the same entry-quality / exit-timing analysis can be run
+    against real money once a couple of months of history exists.
+    """
+    if not rows:
+        return
+    db = get_client()
+    db.table("paper_position_momentum").upsert(
+        rows, on_conflict="position_id,obs_date").execute()
+
+
 def get_latest_paper_snapshot() -> dict | None:
     db = get_client()
     result = (
