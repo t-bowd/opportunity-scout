@@ -37,7 +37,7 @@ def get_momentum_for_positions(position_ids: list[str]) -> list[dict]:
     db = get_client()
     return (
         db.table("smallcap_momentum")
-        .select("position_id, obs_date, climbing, ret_20d, peak_gain_pct")
+        .select("position_id, obs_date, climbing, ret_20d, pnl_pct, peak_gain_pct")
         .in_("position_id", position_ids)
         .order("obs_date")
         .execute().data

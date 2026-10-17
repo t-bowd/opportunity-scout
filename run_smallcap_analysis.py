@@ -33,6 +33,7 @@ load_dotenv(".env.local")
 
 from smallcap import store
 from smallcap.exit import business_days_until, PRE_CATALYST_EXIT_DAYS
+from smallcap.entry import SLIPPAGE_PCT
 
 MIN_N = 3          # don't report a bucket thinner than this
 ENTRY_OBS_MAX_LAG_DAYS = 3   # an "entry-day" reading must actually be near entry
@@ -82,6 +83,53 @@ def _table(title, buckets, key, data, unit=""):
         print(f"{label:>12} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win:4.0f}%")
 
 
+def _momentum_exit_backtest(data, series_by_pos, consecutive: int):
+    """What each position WOULD have returned if sold the first time its momentum
+    broke, instead of being held to its real exit.
+
+    Motivated by the exit-reason table: scheduled exits (pre_catalyst) are the only
+    profitable ones, while pain-triggered exits (disaster_stop at ~-40%, time_limit
+    at ~-12%) produce nearly all the losses. So the question is whether the daily
+    `climbing` flag — recorded for every position since 2026-08-10 but never wired
+    to a decision — would have got us out earlier and cheaper.
+
+    `consecutive` requires that many straight NOT-climbing observations before
+    selling, so a single flickering day doesn't eject a position. A position whose
+    momentum never broke is held to its actual exit (hypothetical == actual), which
+    keeps the comparison honest rather than only counting the cases it helps.
+    Exit slippage is charged on the hypothetical so it isn't flattered."""
+    rows = []
+    for p in data:
+        series = series_by_pos.get(p["id"]) or []
+        if not series:
+            continue
+        # Only positions whose capture starts near entry. Otherwise a momentum break
+        # may have happened BEFORE we were recording, and we would miss it and
+        # wrongly credit the strategy with holding on.
+        lag = (date.fromisoformat(series[0]["obs_date"])
+               - date.fromisoformat(p["entry_date"])).days
+        if not (0 <= lag <= ENTRY_OBS_MAX_LAG_DAYS):
+            continue
+        streak, hypo = 0, None
+        for m in series:
+            if m.get("climbing") is False:
+                streak += 1
+                if streak >= consecutive and m.get("pnl_pct") is not None:
+                    hypo = float(m["pnl_pct"]) - SLIPPAGE_PCT
+                    break
+            else:
+                streak = 0
+        cost = float(p["entry_price_aud"]) * int(p["quantity"])
+        actual = p["pnl_pct"]
+        rows.append({
+            "ticker": p["ticker"], "fired": hypo is not None,
+            "actual_pct": actual, "hypo_pct": actual if hypo is None else hypo,
+            "actual_aud": cost * actual / 100.0,
+            "hypo_aud": cost * (actual if hypo is None else hypo) / 100.0,
+        })
+    return rows
+
+
 def run() -> None:
     closed = [p for p in store.get_closed_positions() if p.get("pnl_pct") is not None]
     if not closed:
@@ -128,8 +176,12 @@ def run() -> None:
     # row at all. Its EARLIEST row would be a mid-life reading — which would silently
     # masquerade as an entry reading and bias the whole result — so only accept a row
     # within ENTRY_OBS_MAX_LAG_DAYS of entry.
+    momentum_rows = store.get_momentum_for_positions([p["id"] for p in data])
+    series_by_pos: dict[str, list] = {}
+    for m in momentum_rows:
+        series_by_pos.setdefault(m["position_id"], []).append(m)   # already oldest-first
     by_pos: dict[str, dict] = {}
-    for m in store.get_momentum_for_positions([p["id"] for p in data]):
+    for m in momentum_rows:
         by_pos.setdefault(m["position_id"], m)   # oldest-first ordering => first wins
     for p in data:
         p["entry_ret_20d"] = None
@@ -178,6 +230,25 @@ def run() -> None:
     for r, sub in sorted(reasons.items(), key=lambda kv: sum(float(p["pnl_aud"] or 0) for p in kv[1])):
         tot = sum(float(p["pnl_aud"] or 0) for p in sub)
         print(f"{r:>22} | {len(sub):>3} | {_fmt_pct(statistics.mean([p['pnl_pct'] for p in sub]))} | {tot:>+10.2f}")
+
+    # --- 6. Would a momentum-invalidation exit have done better? ---------------
+    print("\n── BACKTEST: sell when momentum breaks, instead of holding to the stop ──")
+    print("  (hypothetical is charged exit slippage; positions whose momentum never")
+    print("   broke are held to their real exit, so this isn't cherry-picked)")
+    print(f"{'rule':>18} | {'n':>3} | {'fired':>5} | {'actual':>9} | {'if exited':>9} | {'delta':>9}")
+    any_rows = False
+    for consecutive in (1, 2, 3):
+        rows = _momentum_exit_backtest(data, series_by_pos, consecutive)
+        if len(rows) < MIN_N:
+            continue
+        any_rows = True
+        a = sum(r["actual_aud"] for r in rows)
+        h = sum(r["hypo_aud"] for r in rows)
+        fired = sum(1 for r in rows if r["fired"])
+        label = f"{consecutive} day{'s' if consecutive > 1 else ''} broken"
+        print(f"{label:>18} | {len(rows):>3} | {fired:>5} | {a:>+9.2f} | {h:>+9.2f} | {h-a:>+9.2f}")
+    if not any_rows:
+        print("  (too few positions with momentum captured from entry — re-run later)")
     print()
 
 
