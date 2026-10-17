@@ -131,10 +131,13 @@ STOP_PCT_MIN = 10.0       # floor: a very calm name shouldn't get a spread-tight
 # Names needing more than this are too volatile for the main book — that's the
 # sleeve's job — and are sized down accordingly here anyway.
 STOP_PCT_MAX = 18.0
-# Risk ~1.3% of equity per position. Chosen so a full LIVE_MAX_POSITIONS book
-# actually fits the account: at the current ~$1.7k equity and the stop distances
-# above, ten positions deploy ~$1.67k, leaving a small cash buffer. Raising this
-# would simply exhaust cash after 7–8 names and quietly under-diversify the book.
+# Risk ~1.3% of equity per position. Sized so a full book fits the account rather
+# than exhausting cash partway down the queue. In practice positions come in BELOW
+# the theoretical size — whole-share rounding always rounds down (GTLB wanted ~$128
+# and took one $74 share) and the remaining-cash cap bites on the last few — which
+# is why 10 positions were only deploying ~$1.37k of ~$1.75k equity and why the cap
+# moved to 13. The hard budget still prevents any overspend: once cash is gone the
+# book simply stops filling, whatever the cap says.
 LIVE_RISK_PER_TRADE_FRAC = 0.013
 # Risk-sizing deliberately produces SMALLER positions for wide-stop names — that is
 # the point — so the live floor is well below the paper book's MIN_TRADE_AUD, which
@@ -148,7 +151,16 @@ LIVE_MIN_TRADE_AUD = 75.0
 # realised), positions are equal-weight base size with NO conviction upsizing and
 # NO over-budget override, capped so no single name exceeds a fraction of account
 # equity. US-only — ASX has no execution venue for real money. See broker/SPEC.md.
-LIVE_MAX_POSITIONS = 10
+# Raised 10 -> 13 on 2026-10-17. Risk-based sizing made each position smaller (a
+# volatile name now takes ~$130 rather than a flat $200), so a "full" 10-position
+# book stopped using the account: $1,372 deployed against $1,751 equity with $396
+# sitting idle. Idle cash is the worst outcome available — it earns nothing AND
+# concentrates the book. More positions is also the right direction on the
+# evidence: the n=150 study found NO pick attribute predicts winners, so the edge
+# is portfolio-level, which means wider spread beats fewer, larger bets. Per-trade
+# risk is unchanged at LIVE_RISK_PER_TRADE_FRAC because size is derived from the
+# stop, so this deploys the spare cash without raising risk on any single name.
+LIVE_MAX_POSITIONS = 13
 LIVE_BASE_POSITION_AUD = 200.0
 LIVE_MAX_SINGLE_NAME_FRAC = 0.25   # never more than 25% of equity in one position
 # Real money gets a higher bar than paper's exploratory MIN_SCORE=13. The 30d
