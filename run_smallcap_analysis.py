@@ -83,7 +83,8 @@ def _table(title, buckets, key, data, unit=""):
         print(f"{label:>12} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win:4.0f}%")
 
 
-def _momentum_exit_backtest(data, series_by_pos, consecutive: int):
+def _momentum_exit_backtest(data, series_by_pos, consecutive: int,
+                            only_if_losing: bool = False):
     """What each position WOULD have returned if sold the first time its momentum
     broke, instead of being held to its real exit.
 
@@ -112,10 +113,21 @@ def _momentum_exit_backtest(data, series_by_pos, consecutive: int):
             continue
         streak, hypo = 0, None
         for m in series:
+            day_pnl = m.get("pnl_pct")
+            # `only_if_losing` ring-fences winners BY CONSTRUCTION. Without it the
+            # rule fires on 18 of 18 positions — it exits everything, which would
+            # have cut CRDL (+58.6%), the trade the whole strategy rests on. The
+            # backtest sample can't reveal that cost on its own: momentum capture
+            # began 2026-08-10, after CRDL and ACW were already open, so no winner
+            # is in it. A green position wobbling is noise; a RED position whose
+            # momentum has broken is the actual "thesis is wrong" case.
+            if only_if_losing and (day_pnl is None or float(day_pnl) >= 0):
+                streak = 0
+                continue
             if m.get("climbing") is False:
                 streak += 1
-                if streak >= consecutive and m.get("pnl_pct") is not None:
-                    hypo = float(m["pnl_pct"]) - SLIPPAGE_PCT
+                if streak >= consecutive and day_pnl is not None:
+                    hypo = float(day_pnl) - SLIPPAGE_PCT
                     break
             else:
                 streak = 0
@@ -235,18 +247,23 @@ def run() -> None:
     print("\n── BACKTEST: sell when momentum breaks, instead of holding to the stop ──")
     print("  (hypothetical is charged exit slippage; positions whose momentum never")
     print("   broke are held to their real exit, so this isn't cherry-picked)")
-    print(f"{'rule':>18} | {'n':>3} | {'fired':>5} | {'actual':>9} | {'if exited':>9} | {'delta':>9}")
+    print(f"{'rule':>26} | {'n':>3} | {'fired':>5} | {'actual':>9} | {'if exited':>9} | {'delta':>9}")
     any_rows = False
-    for consecutive in (1, 2, 3):
-        rows = _momentum_exit_backtest(data, series_by_pos, consecutive)
-        if len(rows) < MIN_N:
-            continue
-        any_rows = True
-        a = sum(r["actual_aud"] for r in rows)
-        h = sum(r["hypo_aud"] for r in rows)
-        fired = sum(1 for r in rows if r["fired"])
-        label = f"{consecutive} day{'s' if consecutive > 1 else ''} broken"
-        print(f"{label:>18} | {len(rows):>3} | {fired:>5} | {a:>+9.2f} | {h:>+9.2f} | {h-a:>+9.2f}")
+    for only_losing in (False, True):
+        for consecutive in (1, 2, 3):
+            rows = _momentum_exit_backtest(data, series_by_pos, consecutive, only_losing)
+            if len(rows) < MIN_N:
+                continue
+            any_rows = True
+            a = sum(r["actual_aud"] for r in rows)
+            h = sum(r["hypo_aud"] for r in rows)
+            fired = sum(1 for r in rows if r["fired"])
+            label = (f"{consecutive}d broken"
+                     + (" + underwater" if only_losing else " (any)"))
+            print(f"{label:>26} | {len(rows):>3} | {fired:>5} | {a:>+9.2f} | "
+                  f"{h:>+9.2f} | {h-a:>+9.2f}")
+        if not only_losing:
+            print(f"{'':>26} |     |       |           |           |")
     if not any_rows:
         print("  (too few positions with momentum captured from entry — re-run later)")
     print()
