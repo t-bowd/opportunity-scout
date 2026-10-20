@@ -169,18 +169,29 @@ check("exit breakeven ratchet geometry (buffer == stop, below trail arm)", _chec
 def _check_single_share_ceiling():
     sc = entry._single_share_ceiling
     base = entry.LIVE_BASE_POSITION_AUD          # 200
-    # Paper: plain 2x base, budget/equity don't bind.
+    # Paper: plain 2x base, no risk/budget/equity bound.
     assert sc(entry.BASE_POSITION_AUD, False, 0.0, 0.0) == entry.BASE_POSITION_AUD * 2
-    # Live with ample cash+equity: the 2x stretch cap binds -> AMR/RSG (~$310-330) fit,
-    # a $500 name does not.
-    ample = sc(base, True, 5000.0, 20000.0)
-    assert ample == base * 2 == 400.0
-    assert 330.0 <= ample and 310.0 <= ample and 500.0 > ample
-    # Live hard limits bind ON TOP: thin cash caps it, and the single-name equity
-    # fraction caps it — a stretch can never breach either.
+    # Live, no stop supplied: size-only ceiling, hard limits still bind.
+    assert sc(base, True, 5000.0, 20000.0) == base * 2 == 400.0
     assert sc(base, True, 150.0, 20000.0) == 150.0                      # cash-bound
     assert sc(base, True, 5000.0, 1000.0) == entry.LIVE_MAX_SINGLE_NAME_FRAC * 1000.0
-check("entry._single_share_ceiling (bounded stretch, live caps bind)", _check_single_share_ceiling)
+    # THE RISK BOUND. Replays the real NBIS case: $1,749 equity, 18% stop, risk-sized
+    # target ~$126. A size-only ceiling allowed $252 and NBIS went in at $242 — 2.49%
+    # of equity against a 1.30% target. The risk bound must now refuse it.
+    eq, stop = 1749.0, 18.0
+    target = entry.LIVE_RISK_PER_TRADE_FRAC * eq / (stop / 100.0)
+    ceil_risk = sc(target, True, 5000.0, eq, stop)
+    assert ceil_risk < 242.0, "NBIS-style stretch must now be refused"
+    # ...and whatever it does allow must stay inside the risk multiple.
+    assert ceil_risk * stop / 100.0 <= (entry.SINGLE_SHARE_STRETCH_RISK_MULT
+                                       * entry.LIVE_RISK_PER_TRADE_FRAC * eq) + 1e-9
+    # An expensive but CALM name (tight stop) still gets through — AMR/RSG, the cases
+    # the stretch exists for. This is the behaviour the risk bound must NOT break.
+    calm = 10.0
+    t_calm = entry.LIVE_RISK_PER_TRADE_FRAC * eq / (calm / 100.0)
+    assert sc(t_calm, True, 5000.0, eq, calm) >= 330.0, "calm expensive name must still fit"
+check("entry._single_share_ceiling (risk-bounded stretch; calm expensive still fits)",
+      _check_single_share_ceiling)
 
 # --- 4. Broker layer: pure logic + fail-soft when disabled ---------------------
 from broker import config as bcfg, alpaca as balpaca, execution as bexec, reconcile as brecon

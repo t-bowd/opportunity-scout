@@ -93,6 +93,17 @@ MIN_HISTORY_SESSIONS = 5
 # candidates. 2x keeps a stretched position bounded well inside the single-name
 # equity cap while unblocking the names that were being lost.
 SINGLE_SHARE_STRETCH_MULT = 2.0
+# ...and a RISK ceiling on top, because the size ceiling alone isn't enough once
+# size is derived from the stop. Under the old equal-weight sizing a 2x position
+# was just 2x size; under risk-based sizing a 2x position is a 2x LOSS, and the
+# stretch was silently doubling dollar risk on precisely the worst names — high
+# priced AND volatile, where a wide stop multiplies a big position. NBIS went in
+# at 2.49% of equity against a 1.30% target. Bounding the stretch in RISK terms
+# preserves the "every trade risks the same dollars" property that is the whole
+# point of sizing off the stop. Pleasing side effect: an expensive but CALM name
+# (a tight stop) still gets through — AMR/RSG, the cases the stretch exists for —
+# while an expensive VOLATILE one is correctly refused.
+SINGLE_SHARE_STRETCH_RISK_MULT = 1.5
 
 # --- Volatility-scaled stops + fixed-fractional sizing (live book) ------------
 # The flat −12% stop was the book's biggest structural flaw. Every name got the
@@ -402,15 +413,22 @@ def _live_risk_sized(stop_pct: float, equity_aud: float, budget_aud: float) -> f
 
 
 def _single_share_ceiling(base_aud: float, live: bool, remaining_budget: float,
-                          live_equity_aud: float) -> float:
+                          live_equity_aud: float, stop_pct: float = 0.0) -> float:
     """Pure: the highest share price we'll stretch to for a 1-share position.
 
-    Bounded at SINGLE_SHARE_STRETCH_MULT x base so one expensive name can't quietly
-    become a double-weight position. On the live book the hard limits bind on top:
-    never over the remaining cash, never over the single-name equity fraction.
+    Bounded three ways on the live book, and the RISK bound is the one that matters:
+      - SINGLE_SHARE_STRETCH_MULT x the intended size (no double-weight position),
+      - SINGLE_SHARE_STRETCH_RISK_MULT x the intended dollar RISK — because a 2x
+        position is a 2x loss once size is derived from the stop, so a size-only
+        ceiling let volatile expensive names through at double risk,
+      - and the hard limits: remaining cash, and the single-name equity fraction.
     Pure (no DB/network) so it can be smoke-tested — this sizes real money."""
     ceiling = base_aud * SINGLE_SHARE_STRETCH_MULT
     if live:
+        if stop_pct > 0 and live_equity_aud > 0:
+            max_risk = (SINGLE_SHARE_STRETCH_RISK_MULT
+                        * LIVE_RISK_PER_TRADE_FRAC * live_equity_aud)
+            ceiling = min(ceiling, max_risk / (stop_pct / 100.0))
         ceiling = min(ceiling, remaining_budget,
                       LIVE_MAX_SINGLE_NAME_FRAC * live_equity_aud)
     return ceiling
@@ -766,7 +784,7 @@ def run_entries(week_of: str | None = None) -> None:
             # deliberately sized small doesn't get stretched back up to a full
             # position just because one share happens to cost that much.
             ceiling = _single_share_ceiling(target_aud, live, remaining_budget,
-                                            live_equity_aud)
+                                            live_equity_aud, stop_pct)
             if entry_price_aud > ceiling:
                 skip(f"price_too_high_aud:{entry_price_aud:.2f}")
                 continue
