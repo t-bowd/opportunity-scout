@@ -10,11 +10,26 @@ on:
     # that lands inside market hours (13:30–20:00 UTC summer / 14:30–21:00 winter).
     #
     # One schedule can't guarantee that against a variable multi-hour lag, so we fire
-    # three and let the idempotency guard in run_daily.py make the extra runs cheap
+    # several and let the idempotency guard in run_daily.py make the extras cheap
     # (collect+score once/day; the cheap trade stages re-run and fill any slots the
-    # earlier run deferred). 14:00 is the workhorse — even a ~6h lag lands it by the
-    # 20:00 summer close; 16:00/18:00 backstop a dropped 14:00 run and the winter open.
+    # earlier run deferred, and reconcile records any stop that filled meanwhile).
+    #
+    # WIDENED 2026-10-26 to add 11:00 and 13:00. The 14:00/16:00/18:00 trio was
+    # calibrated for ~5h of lag and kept losing: on 2026-10-05 all three fired after
+    # the close, on 2026-10-07 none fired at all, and on 2026-10-26 none fired while
+    # two positions had stopped out at the broker — so the book sat stale, believing
+    # it held names it no longer did, with freed cash unrecognised and slots idle.
+    # Observed lag runs 2.5–7.5h, so an 11:00 start covers the whole range: on time it
+    # is pre-open and simply defers entries (harmless — reconcile and exits still
+    # run), and anywhere from +2.5h to +7.5h late it lands inside 13:30–20:00. 13:00
+    # covers the shorter-lag case and the winter open (14:30 UTC).
+    #
+    # The earliest slots are deliberately allowed to be pre-open: a run that defers
+    # entries still reconciles broker fills and processes exits, which is exactly the
+    # staleness that bit on 2026-10-26.
     # 7 days/week (weekend runs still process news + paper exits; entries just defer).
+    - cron: "0 11 * * *"
+    - cron: "0 13 * * *"
     - cron: "0 14 * * *"
     - cron: "0 16 * * *"
     - cron: "0 18 * * *"
