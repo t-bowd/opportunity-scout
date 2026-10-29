@@ -314,6 +314,107 @@ def _check_sleeve_momentum_noop():
     sc_store.record_momentum([])
 check("smallcap.store.record_momentum([]) is a no-op", _check_sleeve_momentum_noop)
 
+# --- 6. Analysis helpers --------------------------------------------------------
+# run_analysis / run_hold_analysis decide nothing by themselves, but the hold
+# backtest is the evidence a real-money holding-period change would rest on, so its
+# simulator gets the same treatment as the exit rules it mirrors.
+from datetime import date, timedelta
+
+import run_analysis as ra
+import run_hold_analysis as rha
+
+def _check_role_class():
+    rc = ra._role_class
+    assert rc(["CEO"]) == "ceo_cfo"
+    assert rc(["Chief Financial Officer"]) == "ceo_cfo"
+    assert rc(["President and COO"]) == "ceo_cfo"
+    assert rc(["officer"]) == "other_officer"
+    assert rc(["VP Sales"]) == "other_officer"
+    assert rc(["director"]) == "director"
+    assert rc(["10% owner"]) == "ten_pct_owner"
+    # Most senior role wins when an insider wears several hats.
+    assert rc(["director", "CEO"]) == "ceo_cfo"
+    assert rc(["director", "VP Sales"]) == "other_officer"
+    assert rc(["10% owner", "director"]) == "director"
+    # edgar.py's no-flags fallback carries no information — must not become a bucket.
+    assert rc(["insider"]) is None
+    assert rc([]) is None and rc(None) is None
+check("run_analysis._role_class ranks seniority, ignores the 'insider' fallback", _check_role_class)
+
+def _flat_bars(entry: date, n: int, high: float, low: float, close: float):
+    return [(entry + timedelta(days=i), high, low, close) for i in range(1, n + 1)]
+
+def _check_simulate_stop():
+    e = date(2026, 1, 1)
+    bars = [(date(2026, 1, 2), 101.0, 99.0, 100.0),
+            (date(2026, 1, 5), 95.0, 85.0, 86.0)]
+    o = rha._simulate(e, 100.0, 12.0, bars, None)
+    assert o["reason"] == "stop_loss", o
+    # Fills AT the stop level (88), then pays exit slippage.
+    assert abs(o["ret"] - (88.0 * 0.995 / 100.0 - 1) * 100) < 1e-9, o
+    # A gap-down day must be caught by the LOW, not the close — a close-only poll
+    # is exactly the paper/live divergence this backtest exists to avoid.
+    gap = rha._simulate(e, 100.0, 12.0, [(date(2026, 1, 2), 90.0, 80.0, 89.0)], None)
+    assert gap["reason"] == "stop_loss", gap
+
+def _check_simulate_trail():
+    e = date(2026, 1, 1)
+    bars = [(date(2026, 1, 2), 130.0, 100.0, 128.0),    # arms the trail (+30% peak)
+            (date(2026, 1, 5), 131.0, 115.0, 116.0)]    # falls through 130*0.92
+    o = rha._simulate(e, 100.0, 12.0, bars, None)
+    assert o["reason"] == "trailing_stop", o
+    assert abs(o["ret"] - (119.6 * 0.995 / 100.0 - 1) * 100) < 1e-9, o
+    # No same-bar look-ahead: day 1's high is what ARMS the trail, so day 1's own
+    # low (100, far under 130*0.92) must NOT be able to trigger it.
+    assert o["exit_date"] == date(2026, 1, 5), o
+
+def _check_simulate_breakeven():
+    e = date(2026, 1, 1)
+    bars = [(date(2026, 1, 2), 115.0, 100.0, 114.0),   # peak +15% ≥ 12% stop → ratchet
+            (date(2026, 1, 5), 114.0, 99.0, 99.5)]     # dips under entry
+    o = rha._simulate(e, 100.0, 12.0, bars, None)
+    assert o["reason"] == "breakeven_stop", o
+    # Scratched at entry rather than riding all the way back down to −12%.
+    assert abs(o["ret"] - (100.0 * 0.995 / 100.0 - 1) * 100) < 1e-9, o
+
+def _check_simulate_time_and_window():
+    e = date(2026, 1, 1)
+    flat = _flat_bars(e, 70, 101.0, 99.0, 100.0)
+    o = rha._simulate(e, 100.0, 12.0, flat, 60)
+    assert o["reason"] == "time_exit" and o["days_held"] == 60, o
+    # No calendar limit → runs to the edge of the available path.
+    o2 = rha._simulate(e, 100.0, 12.0, flat, None)
+    assert o2["reason"] == "window_end" and o2["days_held"] == 70, o2
+    # Shortening the limit must actually shorten the hold (the whole point of the sweep).
+    assert rha._simulate(e, 100.0, 12.0, flat, 20)["days_held"] == 20
+
+def _check_simulate_reprieve():
+    # Green (+15% peak), still pinned to its peak, past the 60d limit: the reprieve
+    # must spare it rather than time-exiting a still-developing winner.
+    e = date(2026, 1, 1)
+    bars = _flat_bars(e, 70, 115.0, 110.0, 114.0)
+    o = rha._simulate(e, 100.0, 12.0, bars, 60)
+    assert o["reason"] == "window_end", o
+    # ...but the reprieve is BOUNDED — give it a longer path and it still exits at
+    # the limit + TIME_EXIT_REPRIEVE_DAYS, never held forever.
+    longer = _flat_bars(e, 140, 115.0, 110.0, 114.0)
+    o2 = rha._simulate(e, 100.0, 12.0, longer, 60)
+    assert o2["reason"] == "time_exit", o2
+    assert o2["days_held"] == 60 + rha.TIME_EXIT_REPRIEVE_DAYS, o2
+
+check("run_hold_analysis._simulate — stop fills on the LOW", _check_simulate_stop)
+check("run_hold_analysis._simulate — trail arms on the high, no same-bar exit", _check_simulate_trail)
+check("run_hold_analysis._simulate — breakeven ratchet scratches at entry", _check_simulate_breakeven)
+check("run_hold_analysis._simulate — time exit honours the swept limit", _check_simulate_time_and_window)
+check("run_hold_analysis._simulate — reprieve spares a green climber, but is bounded", _check_simulate_reprieve)
+
+def _check_hold_sweep_shape():
+    # The sweep's longest limit must fit inside the required path, or short limits
+    # would be scored on names the long limit never finished.
+    assert rha.MAX_SWEEP_DAYS == max(h for h in rha.HOLD_SWEEP if h is not None)
+    assert rha.REQUIRED_PATH_DAYS >= rha.MAX_SWEEP_DAYS + rha.TIME_EXIT_REPRIEVE_DAYS
+check("run_hold_analysis sweep fits inside the required price path", _check_hold_sweep_shape)
+
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")
     raise SystemExit(1)

@@ -1,0 +1,28 @@
+name: Exit-Timing Backtest
+
+# Separate from the Forward-Return Analysis because it does a different job: that
+# one describes what picks returned, this one simulates what the book's OWN exit
+# rules would have returned at each calendar holding limit. It also runs much
+# longer — it pulls a daily price path per ticker rather than just SPY.
+on:
+  workflow_dispatch:
+
+jobs:
+  hold-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Exit-timing backtest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python run_hold_analysis.py
