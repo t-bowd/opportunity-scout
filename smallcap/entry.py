@@ -26,6 +26,11 @@ from smallcap.pricing import fetch_fx_rate, to_aud
 # names — starving the research dataset the 4-6wk review needs. Doubled the SLOT
 # COUNT (and pool + per-vertical cap to match), NOT the position size, so we get
 # ~2x the picks/data at the same $100 equal weight. Positions stay tiny by design.
+# Wind-down switch (2026-10-29). True = no new entries; exits/momentum keep running
+# so the open book closes out and the dataset completes. Full reasoning in
+# run_entries below. Set False to resume if the sleeve is ever revisited.
+SMALLCAP_ENTRIES_PAUSED = True
+
 SMALLCAP_POOL_AUD = 2000.0        # HARD cap (unlike the main book's soft pool)
 SMALLCAP_POSITION_AUD = 100.0     # equal weight — no conviction scaling
 SMALLCAP_MAX_POSITIONS = 20
@@ -79,6 +84,29 @@ def passes_gates(cand: dict, held_tickers: set[str], vertical_counts: dict[str, 
 
 
 def run_entries() -> None:
+    # WOUND DOWN 2026-10-29 (Tim's call). New entries stopped; exits keep running so
+    # the open book closes out cleanly and the momentum-exit experiment gets its full
+    # sample. Disable the smallcap workflows once the book reaches zero.
+    #
+    # Why: 50 closed trades at a 12% win rate and −$744.67 realized (−37% of the $2k
+    # paper pool). The exit machinery was fixed and demonstrably works — the
+    # momentum-invalidation exit cut average loss per exit from −39.6% (disaster
+    # stops) to −18.3%, and −14.5% on positions it saw from entry. But the entry side
+    # never worked, and the arithmetic doesn't close: at a 12% win rate and ~−15%
+    # average loss, break-even needs the average WINNER to be ~+110%. The best trade
+    # the sleeve ever produced was CRDL at +58.6%. No exit rule repairs an 88% loss
+    # rate, and the one credible entry hypothesis (buying extended) died at +0.02
+    # correlation over 13 instrumented closes.
+    #
+    # The sleeve succeeded as a research instrument — it produced the momentum-exit
+    # finding, killed two plausible hypotheses with data, and surfaced real bugs (the
+    # pre-catalyst churn loop, the poll-based stop gapping through −35% to −50%).
+    # Those lessons transfer to the main book, which is where the real money is.
+    if SMALLCAP_ENTRIES_PAUSED:
+        print("[smallcap/entry] ⛔ ENTRIES PAUSED — sleeve winding down; exits still "
+              "run so the open book closes out. See the note in entry.py.")
+        return
+
     today = date.today()
     open_positions = store.get_open_positions()
     held = {p["ticker"] for p in open_positions}
