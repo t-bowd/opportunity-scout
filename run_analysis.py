@@ -17,6 +17,7 @@ Read-only. Run on demand, or wire into the weekly digest once the sample matures
     python run_analysis.py            # 30d analysis (default)
     python run_analysis.py --90d      # use 90d returns where available
 """
+import math
 import re
 import sys
 import statistics
@@ -82,9 +83,11 @@ def _form4_signals() -> list[dict]:
     db = get_client()
     out, start, page = [], 0, 1000
     while True:
+        # .range() before the filter: it only exists on the SELECT builder, and
+        # .eq() happening to return that same object is a postgrest-py detail.
         rows = (db.table("signals").select("id, raw_data, signal_date")
-                .eq("source", FORM4_SOURCE)
-                .range(start, start + page - 1).execute().data)
+                .range(start, start + page - 1)
+                .eq("source", FORM4_SOURCE).execute().data)
         out.extend(rows)
         if len(rows) < page:
             return out
@@ -357,7 +360,8 @@ def run() -> None:
             if len(pairs) < MIN_N:
                 print(f"{label:>18}:   n/a ({len(pairs)} rows)")
                 continue
-            import math
+            # log10 for dollars: purchase sizes span ~$10k to ~$10M, so a raw
+            # Pearson would be driven entirely by the handful of largest buys.
             xs = [math.log10(d[key]) if key == "buy_value_usd" else d[key] for d in pairs]
             c = _pearson(xs, [d["ret"] for d in pairs])
             print(f"{label:>18}: {c:+.2f}  (n={len(pairs)})" if c is not None
