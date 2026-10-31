@@ -264,21 +264,43 @@ def _evaluate(paths: list[dict], benches: dict, **geo) -> dict:
         "win": sum(1 for r in rets if r > 0) / len(rets) * 100,
         "a_spy": _mean_or_none([o["a_SPY"] for o in outcomes]),
         "a_iwm": _mean_or_none([o["a_IWM"] for o in outcomes]),
+        "a_iwm_mo": _alpha_per_month(outcomes, "a_IWM"),
         "med_days": statistics.median([o["days_held"] for o in outcomes]),
         "counts": {r: sum(1 for o in outcomes if o["reason"] == r) for r in REASONS},
     }
 
 
+def _alpha_per_month(outcomes: list[dict], key: str) -> float | None:
+    """Alpha per 30 days of time-in-market, aggregated over the book.
+
+    Per-TRADE alpha mechanically rewards holding longer: if the average pick beats
+    the benchmark at all, a config that holds 40 days accrues more of that edge than
+    one holding 16, and the wider-trail rows look better for a reason that has
+    nothing to do with better exit timing. With a hard slot cap that is the wrong
+    comparison — a slot held 40 days cannot hold anything else — so the decision
+    metric is alpha per position-DAY.
+
+    Computed as total alpha / total days rather than the mean of per-trade ratios,
+    because a 3-day stop-out would otherwise annualise into a meaningless −180%.
+    """
+    pairs = [(o[key], o["days_held"]) for o in outcomes
+             if o.get(key) is not None and o["days_held"] > 0]
+    if not pairs:
+        return None
+    total_days = sum(d for _a, d in pairs)
+    return (sum(a for a, _d in pairs) / total_days * 30) if total_days else None
+
+
 def _hdr(label: str, width: int = 7) -> None:
     print(f"{label:>{width}} | {'n':>3} | {'avg':>7} | {'median':>7} | {'win%':>5} | "
-          f"{'α SPY':>7} | {'α IWM':>7} | {'med d':>5} | "
+          f"{'α SPY':>7} | {'α IWM':>7} | {'α/mo':>7} | {'med d':>5} | "
           + " | ".join(f"{r[:5]:>5}" for r in REASONS))
 
 
 def _print_row(label: str, s: dict, width: int = 7, mark: str = "") -> None:
     print(f"{label:>{width}} | {s['n']:>3} | {_fmt(s['avg'])} | {_fmt(s['med'])} | "
           f"{s['win']:4.0f}% | {_fmt(s['a_spy'])} | {_fmt(s['a_iwm'])} | "
-          f"{s['med_days']:>5.0f} | "
+          f"{_fmt(s['a_iwm_mo'])} | {s['med_days']:>5.0f} | "
           + " | ".join(f"{s['counts'][r]:>5}" for r in REASONS) + mark)
 
 
@@ -320,7 +342,9 @@ def _grid_table(paths: list[dict], benches: dict) -> None:
     barely beat the median, the geometry is not where the money is and nothing
     should change. Only a wide spread AND a readable gradient justify a real change.
     """
-    print("\n── FULL GRID: every geometry combination, ranked by α IWM ──")
+    print("\n── FULL GRID: every geometry combination, ranked by α IWM PER MONTH ──")
+    print("  (per-month, not per-trade: a slot held twice as long must earn twice as "
+          "much to be worth it)")
     results = []
     # The vol-scaled variants keep the live flat width as their trail_pct: _simulate
     # only overrides it when the name HAS an ATR, so this is the fallback for a name
@@ -342,15 +366,15 @@ def _grid_table(paths: list[dict], benches: dict) -> None:
                            and tv["trail_pct"] == LIVE_GEOMETRY["trail_pct"])
                 results.append({"label": f"r{rm:g} arm{arm:g} trail{trail_lbl}",
                                 "stats": s, "live": is_live,
-                                "key": s["a_iwm"] if s["a_iwm"] is not None else -999})
+                                "key": s["a_iwm_mo"] if s["a_iwm_mo"] is not None else -999})
     results.sort(key=lambda r: -r["key"])
     keys = [r["key"] for r in results]
-    print(f"  {len(results)} combinations | α IWM spread "
+    print(f"  {len(results)} combinations | α IWM/month spread "
           f"{min(keys):+.1f}% … {max(keys):+.1f}% | median {statistics.median(keys):+.1f}%")
     live = next((i for i, r in enumerate(results) if r["live"]), None)
     if live is not None:
         print(f"  LIVE config ranks {live + 1} of {len(results)} "
-              f"(α IWM {results[live]['key']:+.1f}%)")
+              f"(α IWM/month {results[live]['key']:+.1f}%)")
     _hdr("config", 26)
     for r in results[:8]:
         _print_row(r["label"], r["stats"], 26, "  <= LIVE" if r["live"] else "")

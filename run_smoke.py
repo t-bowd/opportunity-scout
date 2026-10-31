@@ -456,6 +456,22 @@ def _check_simulate_geometry_knobs():
 check("run_hold_analysis._simulate geometry knobs (ratchet/arm/trail/vol-scaled)",
       _check_simulate_geometry_knobs)
 
+def _check_alpha_per_month():
+    apm = rha._alpha_per_month
+    # Total alpha / total days: +10% over 30d and +20% over 60d is +10%/month.
+    assert abs(apm([{"a_IWM": 10.0, "days_held": 30},
+                    {"a_IWM": 20.0, "days_held": 60}], "a_IWM") - 10.0) < 1e-9
+    # A 3-day −18% stop must be weighted by its 3 days, not annualised into −180%.
+    # Mean-of-ratios would report ≈+4.4% here; day-weighting gives ≈+1%.
+    mixed = apm([{"a_IWM": -18.0, "days_held": 3},
+                 {"a_IWM": 20.0, "days_held": 60}], "a_IWM")
+    assert 0.5 < mixed < 1.5, mixed
+    assert apm([], "a_IWM") is None
+    assert apm([{"a_IWM": None, "days_held": 5}], "a_IWM") is None
+    assert apm([{"a_IWM": 5.0, "days_held": 0}], "a_IWM") is None   # no div-by-zero
+check("run_hold_analysis._alpha_per_month day-weights, never annualises a stop",
+      _check_alpha_per_month)
+
 def _check_dual_benchmark():
     # Both benchmark symbols must be distinct and wired into the row formatter, or a
     # table would silently print one benchmark twice.
