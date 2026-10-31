@@ -135,17 +135,27 @@ def _attach_insider_attrs(data: list[dict]) -> int:
     return attached
 
 
-def _spy_series(lookback_days: int = 250) -> tuple[list, list]:
-    """SPY daily closes as (sorted dates, closes). Default ~8 months.
+# Two benchmarks, because one of them has been quietly flattering//punishing every
+# number in this report. Alpha vs SPY removes the BROAD market but not the SIZE
+# factor, and this book is deliberately small/micro-cap (see the IPO-capture
+# thesis). If small caps lag large caps for a quarter, SPY-alpha reads as "our
+# picking got worse" when the picks were merely small. IWM is the like-for-like
+# comparison; SPY stays so the historical numbers remain diffable.
+BENCH_SPY = "SPY"    # large-cap: what we have always reported
+BENCH_IWM = "IWM"    # small-cap: the universe we actually buy from
+
+
+def _bench_series(symbol: str = BENCH_SPY, lookback_days: int = 250) -> tuple[list, list]:
+    """A benchmark's daily closes as (sorted dates, closes). Default ~8 months.
 
     run_hold_analysis.py asks for a longer window: it benchmarks each pick over its
-    own realised holding period, so it needs SPY back to the oldest ENTRY, not just
-    the oldest matured return.
+    own realised holding period, so it needs the index back to the oldest ENTRY,
+    not just the oldest matured return.
     """
     t2 = int(datetime.now(timezone.utc).timestamp())
     t1 = int((datetime.now(timezone.utc) - timedelta(days=lookback_days)).timestamp())
     try:
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/SPY"
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
                f"?period1={t1}&period2={t2}&interval=1d")
         r = requests.get(url, headers={"User-Agent": "OpportunityScout"}, timeout=15)
         res = r.json()["chart"]["result"][0]
@@ -184,6 +194,32 @@ def _fmt_pct(v):
     return f"{v*100:+6.1f}%" if v is not None else "   n/a"
 
 
+def _mean_or_none(vals):
+    clean = [v for v in vals if v is not None]
+    return statistics.mean(clean) if clean else None
+
+
+# Every table in this report shows the same six statistics, and used to repeat the
+# formatting seven times — which is how a column gets added to six tables and
+# forgotten in the seventh. One header, one row, used everywhere.
+def _hdr(label: str, width: int = 7) -> None:
+    print(f"{label:>{width}} | {'n':>3} | {'avg':>7} | {'median':>7} | {'win%':>5} | "
+          f"{'α SPY':>7} | {'α IWM':>7}")
+
+
+def _row(label: str, subset: list[dict], width: int = 7) -> None:
+    """One stats row for a subset, or a '(too few)' placeholder."""
+    if len(subset) < MIN_N:
+        print(f"{label:>{width}} | {len(subset):>3} |   (too few)")
+        return
+    rets = [d["ret"] for d in subset]
+    win = sum(1 for x in rets if x > 0) / len(rets)
+    print(f"{label:>{width}} | {len(rets):>3} | {_fmt_pct(statistics.mean(rets))} | "
+          f"{_fmt_pct(statistics.median(rets))} | {win*100:4.0f}% | "
+          f"{_fmt_pct(_mean_or_none([d['alpha'] for d in subset]))} | "
+          f"{_fmt_pct(_mean_or_none([d['alpha_iwm'] for d in subset]))}")
+
+
 def run() -> None:
     db = get_client()
     rows = db.table("feedback").select(
@@ -194,7 +230,8 @@ def run() -> None:
     ).execute().data
 
     price_col = "price_90d" if HORIZON == 90 else "price_30d"
-    spy_dates, spy_closes = _spy_series()
+    spy_dates, spy_closes = _bench_series(BENCH_SPY)
+    iwm_dates, iwm_closes = _bench_series(BENCH_IWM)
 
     # Build records with a realised forward return + market-relative alpha.
     recs = {}   # vehicle -> best record (highest total_score)
@@ -210,17 +247,21 @@ def run() -> None:
             continue
         ret = fwd / ref - 1
         created = date.fromisoformat(created_raw[:10])
-        alpha = None
-        s0 = _spy_on(spy_dates, spy_closes, created)
-        s1 = _spy_on(spy_dates, spy_closes, created + timedelta(days=HORIZON))
-        if s0 and s1 and s0 > 0:
-            alpha = ret - (s1 / s0 - 1)
+
+        def _alpha(bdates, bcloses):
+            b0 = _spy_on(bdates, bcloses, created)
+            b1 = _spy_on(bdates, bcloses, created + timedelta(days=HORIZON))
+            return ret - (b1 / b0 - 1) if (b0 and b1 and b0 > 0) else None
+
+        alpha = _alpha(spy_dates, spy_closes)
+        alpha_iwm = _alpha(iwm_dates, iwm_closes)
         rec = {
             "vehicle": tkr, "pattern": opp.get("pattern") or "?",
             "score": opp.get("total_score") or 0,
             "conviction": opp.get("conviction") or 0, "asymmetry": opp.get("asymmetry") or 0,
             "liquidity": opp.get("liquidity") or 0, "timing": opp.get("timing") or 0,
-            "acted": bool(r.get("acted")), "ret": ret, "alpha": alpha,
+            "acted": bool(r.get("acted")), "ret": ret,
+            "alpha": alpha, "alpha_iwm": alpha_iwm,
             "signal_ids": opp.get("signal_ids") or [],
             "rescore_action": opp.get("rescore_action"),
             "ret_20d_at_score": (float(opp["ret_20d_at_score"])
@@ -232,40 +273,30 @@ def run() -> None:
 
     data = list(recs.values())
     print(f"\n=== Forward-return analysis ({HORIZON}d) ===")
+    missing = [n for n, s in ((BENCH_SPY, spy_dates), (BENCH_IWM, iwm_dates)) if not s]
     print(f"{len(rows)} feedback rows → {len(data)} tickers with a matured {HORIZON}d return "
-          f"(deduped by ticker){'  [SPY alpha unavailable]' if not spy_dates else ''}\n")
+          f"(deduped by ticker)"
+          f"{'  [' + '/'.join(missing) + ' alpha unavailable]' if missing else ''}")
+    print(f"α SPY = vs large caps (the historical column). α IWM = vs small caps, "
+          f"the universe we actually buy from — the honest like-for-like.\n")
     if len(data) < MIN_N:
         print(f"Not enough matured data yet (need ≥{MIN_N}). Re-run once more picks cross {HORIZON} days.\n")
         return
 
-    def _agg(subset):
-        rets = [d["ret"] for d in subset]
-        alphas = [d["alpha"] for d in subset if d["alpha"] is not None]
-        win = sum(1 for x in rets if x > 0) / len(rets)
-        return (len(rets), statistics.mean(rets), statistics.median(rets),
-                win, (statistics.mean(alphas) if alphas else None))
-
     # 1. By score bucket -----------------------------------------------------
     print("── Return by score bucket ──")
-    print(f"{'bucket':>7} | {'n':>3} | {'avg':>7} | {'median':>7} | {'win%':>5} | {'avg α':>7}")
+    _hdr("bucket")
     for lo, hi, label in SCORE_BUCKETS:
-        sub = [d for d in data if lo <= d["score"] <= hi]
-        if len(sub) < MIN_N:
-            print(f"{label:>7} | {len(sub):>3} |   (too few)")
-            continue
-        n, avg, med, win, a = _agg(sub)
-        print(f"{label:>7} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win*100:4.0f}% | {_fmt_pct(a)}")
+        _row(label, [d for d in data if lo <= d["score"] <= hi])
 
     # 2. By pattern ----------------------------------------------------------
     print("\n── Return by pattern ──")
-    print(f"{'pattern':>14} | {'n':>3} | {'avg':>7} | {'median':>7} | {'win%':>5} | {'avg α':>7}")
+    _hdr("pattern", 14)
     patterns = sorted({d["pattern"] for d in data})
     for p in sorted(patterns, key=lambda p: -statistics.mean([d["ret"] for d in data if d["pattern"] == p])):
         sub = [d for d in data if d["pattern"] == p]
-        if len(sub) < MIN_N:
-            continue
-        n, avg, med, win, a = _agg(sub)
-        print(f"{p:>14} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win*100:4.0f}% | {_fmt_pct(a)}")
+        if len(sub) >= MIN_N:
+            _row(p, sub, 14)
 
     # 3. Dimension ↔ return correlation --------------------------------------
     print("\n── Which score dimension predicts return? (Pearson corr with return) ──")
@@ -278,13 +309,9 @@ def run() -> None:
 
     # 4. Entered vs blocked (opportunity cost of the slot cap) ----------------
     print("\n── Entered vs blocked (is the slot cap costing us?) ──")
+    _hdr("acted", 8)
     for label, flag in (("entered", True), ("blocked", False)):
-        sub = [d for d in data if d["acted"] is flag]
-        if len(sub) < MIN_N:
-            print(f"{label:>8}: {len(sub)} (too few)")
-            continue
-        n, avg, med, win, a = _agg(sub)
-        print(f"{label:>8}: n={n:>3}  avg {_fmt_pct(avg)}  median {_fmt_pct(med)}  win {win*100:4.0f}%  α {_fmt_pct(a)}")
+        _row(label, [d for d in data if d["acted"] is flag], 8)
 
     # 5. Rescore-at-entry: does a name marked DOWN on its scoring day underperform?
     # (Instrumented migration 005; only rows scored after that fill in — NULL before.)
@@ -293,13 +320,9 @@ def run() -> None:
     if len(_has_rescore) < MIN_N:
         print(f"  (only {len(_has_rescore)} instrumented rows — accruing since migration 005; re-check later)")
     else:
+        _hdr("rescore", 13)
         for act in ("insert", "rescore_up", "rescore_down"):
-            sub = [d for d in _has_rescore if d["rescore_action"] == act]
-            if len(sub) < MIN_N:
-                print(f"{act:>13} | {len(sub):>3} |   (too few)")
-                continue
-            n, avg, med, win, a = _agg(sub)
-            print(f"{act:>13} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win*100:4.0f}% | {_fmt_pct(a)}")
+            _row(act, [d for d in _has_rescore if d["rescore_action"] == act], 13)
 
     # 6. Entry extension: does buying a name already run-up (high trailing 20d) revert?
     print("\n── Return by entry extension (trailing 20d at score; hypothesis: extended = reverts) ──")
@@ -311,44 +334,29 @@ def run() -> None:
                        (0.20, 0.50, "20-50%"), (0.50, 9.9, ">50%")]
         c = _pearson([d["ret_20d_at_score"] for d in _has_ext], [d["ret"] for d in _has_ext])
         print(f"  corr(trailing-20d, forward-{HORIZON}d return): {c:+.2f}" if c is not None else "  corr: n/a")
+        _hdr("bucket")
         for lo, hi, label in EXT_BUCKETS:
-            sub = [d for d in _has_ext if lo <= d["ret_20d_at_score"] < hi]
-            if len(sub) < MIN_N:
-                print(f"{label:>7} | {len(sub):>3} |   (too few)")
-                continue
-            n, avg, med, win, a = _agg(sub)
-            print(f"{label:>7} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {win*100:4.0f}% | {_fmt_pct(a)}")
+            _row(label, [d for d in _has_ext if lo <= d["ret_20d_at_score"] < hi])
 
     # 7. Objective insider attributes — the FACTS of the filing, not the score.
     print("\n── Objective Form 4 attributes (hypothesis: the filing's facts beat the score) ──")
     attached = _attach_insider_attrs(data)
     print(f"  {attached} of {len(data)} records have a linked Form 4 purchase")
 
-    def _bucket_table(title, buckets, key, subset, fmt=lambda v: v):
+    def _bucket_table(title, buckets, key, subset):
         print(f"\n  {title}")
-        print(f"{'bucket':>14} | {'n':>3} | {'avg':>7} | {'median':>7} | {'win%':>5} | {'avg α':>7}")
+        _hdr("bucket", 14)
         for lo, hi, label in buckets:
-            sub = [d for d in subset if d.get(key) is not None and lo <= d[key] < hi]
-            if len(sub) < MIN_N:
-                print(f"{label:>14} | {len(sub):>3} |   (too few)")
-                continue
-            n, avg, med, win, a = _agg(sub)
-            print(f"{label:>14} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | "
-                  f"{win*100:4.0f}% | {_fmt_pct(a)}")
+            _row(label, [d for d in subset
+                         if d.get(key) is not None and lo <= d[key] < hi], 14)
 
     if attached < MIN_N:
         print("  (too few linked filings — nothing to segment on yet)")
     else:
         print("\n  Return by buyer seniority")
-        print(f"{'role':>14} | {'n':>3} | {'avg':>7} | {'median':>7} | {'win%':>5} | {'avg α':>7}")
+        _hdr("role", 14)
         for rc in ROLE_CLASSES:
-            sub = [d for d in data if d.get("role_class") == rc]
-            if len(sub) < MIN_N:
-                print(f"{rc:>14} | {len(sub):>3} |   (too few)")
-                continue
-            n, avg, med, win, a = _agg(sub)
-            print(f"{rc:>14} | {n:>3} | {_fmt_pct(avg)} | {_fmt_pct(med)} | "
-                  f"{win*100:4.0f}% | {_fmt_pct(a)}")
+            _row(rc, [d for d in data if d.get("role_class") == rc], 14)
 
         _bucket_table("Return by purchase size (USD)", VALUE_BUCKETS, "buy_value_usd", data)
         _bucket_table(f"Return by buyer cluster (distinct buyers within "

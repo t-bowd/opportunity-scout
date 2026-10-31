@@ -320,6 +320,7 @@ check("smallcap.store.record_momentum([]) is a no-op", _check_sleeve_momentum_no
 # simulator gets the same treatment as the exit rules it mirrors.
 from datetime import date, timedelta
 
+from paper_trader import exit as sc_exit_main
 import run_analysis as ra
 import run_hold_analysis as rha
 
@@ -407,6 +408,66 @@ check("run_hold_analysis._simulate — trail arms on the high, no same-bar exit"
 check("run_hold_analysis._simulate — breakeven ratchet scratches at entry", _check_simulate_breakeven)
 check("run_hold_analysis._simulate — time exit honours the swept limit", _check_simulate_time_and_window)
 check("run_hold_analysis._simulate — reprieve spares a green climber, but is bounded", _check_simulate_reprieve)
+
+def _check_simulate_geometry_knobs():
+    e = date(2026, 1, 1)
+    # A name that runs to +15% then rolls back to entry. With the LIVE geometry
+    # (ratchet at 1.0x an 18% stop) the ratchet never arms — +15% < +18% — so it
+    # rides all the way down to the full stop. This is the near-dead-ratchet case.
+    bars = [(date(2026, 1, 2), 115.0, 100.0, 114.0),
+            (date(2026, 1, 5), 114.0, 80.0, 81.0)]
+    live = rha._simulate(e, 100.0, 18.0, bars, 60)
+    assert live["reason"] == "stop_loss", live
+    # Arming at 0.6x (i.e. +10.8%) instead turns that same path into a scratch.
+    early = rha._simulate(e, 100.0, 18.0, bars, 60, ratchet_mult=0.6)
+    assert early["reason"] == "breakeven_stop", early
+    assert early["ret"] > live["ret"], (early, live)
+
+    # Trail arm: a +25% peak arms under the live +20% but not under a +30% arm.
+    climb = [(date(2026, 1, 2), 125.0, 100.0, 124.0),
+             (date(2026, 1, 5), 124.0, 100.0, 101.0)]
+    assert rha._simulate(e, 100.0, 12.0, climb, 60)["reason"] == "trailing_stop"
+    assert rha._simulate(e, 100.0, 12.0, climb, 60,
+                         trail_arm=30.0)["reason"] != "trailing_stop"
+
+    # Trail width: a wider trail must survive a dip that a narrow one sells into.
+    narrow = rha._simulate(e, 100.0, 12.0, climb, 60, trail_pct=5.0)
+    wide = rha._simulate(e, 100.0, 12.0, climb, 60, trail_pct=25.0)
+    assert narrow["reason"] == "trailing_stop" and wide["reason"] != "trailing_stop"
+
+    # Vol-scaled trail: 3x a 5% ATR == a 15% trail, so they must agree exactly.
+    scaled = rha._simulate(e, 100.0, 12.0, climb, 60, trail_atr_mult=3.0, atr_pct=5.0)
+    flat15 = rha._simulate(e, 100.0, 12.0, climb, 60, trail_pct=15.0)
+    assert scaled["reason"] == flat15["reason"], (scaled, flat15)
+    assert abs(scaled["ret"] - flat15["ret"]) < 1e-9
+    # ...and the 4% floor must hold, so a near-zero ATR can't produce a hair trigger.
+    floored = rha._simulate(e, 100.0, 12.0, climb, 60, trail_atr_mult=3.0, atr_pct=0.01)
+    assert abs(floored["ret"] - rha._simulate(e, 100.0, 12.0, climb, 60,
+                                              trail_pct=4.0)["ret"]) < 1e-9
+    # A missing ATR must fall back to the flat width, never to 0.
+    no_atr = rha._simulate(e, 100.0, 12.0, climb, 60, trail_atr_mult=3.0, atr_pct=None)
+    assert abs(no_atr["ret"] - rha._simulate(e, 100.0, 12.0, climb, 60)["ret"]) < 1e-9
+
+    # Defaults must reproduce the live book exactly — every sweep leans on this.
+    assert rha.LIVE_GEOMETRY["trail_arm"] == sc_exit_main.TRAILING_STOP_ACTIVATE_PCT
+    assert rha.LIVE_GEOMETRY["trail_pct"] == sc_exit_main.TRAILING_STOP_TRAIL_PCT
+    assert rha.LIVE_GEOMETRY["ratchet_mult"] == 1.0
+    assert rha.LIVE_GEOMETRY["trail_atr_mult"] is None
+check("run_hold_analysis._simulate geometry knobs (ratchet/arm/trail/vol-scaled)",
+      _check_simulate_geometry_knobs)
+
+def _check_dual_benchmark():
+    # Both benchmark symbols must be distinct and wired into the row formatter, or a
+    # table would silently print one benchmark twice.
+    assert ra.BENCH_SPY != ra.BENCH_IWM
+    assert ra._mean_or_none([None, None]) is None
+    assert ra._mean_or_none([0.1, None, 0.3]) == 0.2
+    # _row reads both alpha keys; a record missing one must not raise.
+    import contextlib, io
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        ra._row("t", [{"ret": 0.1, "alpha": 0.02, "alpha_iwm": None}] * ra.MIN_N)
+    assert "n/a" in buf.getvalue(), buf.getvalue()   # the missing IWM alpha shows as n/a
+check("run_analysis dual SPY/IWM benchmark plumbing", _check_dual_benchmark)
 
 def _check_hold_sweep_shape():
     # The sweep's longest limit must fit inside the required path, or short limits
