@@ -15,6 +15,14 @@ from db.client import (
 )
 from paper_trader.exit import _fetch_price, _fetch_fx_rate
 
+# The graduation gate is REAL-MONEY closes, not total closes. The sim book's
+# record answers "does the strategy work in simulation", which is a different
+# question — and counting every close against 20 made this a dead instrument:
+# it passed 20 weeks ago and printed "0 trades until graduation review" on
+# every run after that. Count the live book, and keep saying something true
+# once the gate is passed.
+GRADUATION_MIN_LIVE_CLOSES = 15
+
 
 def _daily_closes(symbol: str) -> list[tuple[date, float]]:
     """Sorted (date, close) for the last year, dropping gap days. [] on failure."""
@@ -97,6 +105,35 @@ def _deployed_aud(positions: list[dict]) -> float:
                for p in positions)
 
 
+def _print_realised(label: str, closes: list[dict]) -> None:
+    """The realised record, split by HOW each position left the book.
+
+    The split is the part that carries the finding. A book whose losses are all
+    stops is a different problem from one whose losses are all time exits, and
+    the totals hide which one you have — deriving it by hand from the run logs
+    is what this line exists to stop.
+
+    Worst reason first, so the line leads with where the money went.
+    """
+    if not closes:
+        return
+    pnls = [float(p["pnl_aud"]) for p in closes]
+    total = sum(pnls)
+    wins = sum(1 for x in pnls if x > 0)
+    print(f"[paper/snapshot] {label} realised: {len(pnls)} closed, "
+          f"{wins / len(pnls) * 100:.0f}% win, ${total:+.0f} total, "
+          f"expectancy ${total / len(pnls):+.2f}")
+
+    by_reason: dict[str, list[float]] = {}
+    for pos, pnl in zip(closes, pnls):
+        by_reason.setdefault(pos.get("exit_reason") or "unknown", []).append(pnl)
+    split = "  ".join(
+        f"{reason} {len(v)}× {sum(1 for x in v if x > 0)}w ${sum(v):+.0f}"
+        for reason, v in sorted(by_reason.items(), key=lambda kv: sum(kv[1]))
+    )
+    print(f"[paper/snapshot] {label} by exit: {split}")
+
+
 def run_snapshot() -> None:
     today = date.today()
     open_pos = get_open_paper_positions()
@@ -110,10 +147,11 @@ def run_snapshot() -> None:
     # Manual closes are interventions (e.g. flushing a position opened on a
     # mislabeled signal), not strategy outcomes — exclude them from the
     # performance sample so they don't pollute expectancy / win rate / graduation.
-    closed_pnls = [
-        float(p["pnl_aud"]) for p in closed_pos
+    strategy_closes = [
+        p for p in closed_pos
         if p.get("pnl_aud") is not None and p.get("status") != "closed_manual"
     ]
+    closed_pnls = [float(p["pnl_aud"]) for p in strategy_closes]
     total_pnl = sum(closed_pnls)
     wins = sum(1 for pnl in closed_pnls if pnl > 0)
 
@@ -133,7 +171,6 @@ def run_snapshot() -> None:
 
     upsert_paper_snapshot(snap)
 
-    trades_needed = max(0, 20 - len(closed_pnls))
     exp_str = f"${expectancy:+.2f}" if expectancy is not None else "n/a"
     wr_str = f"{win_rate:.0f}%" if win_rate is not None else "n/a"
 
@@ -141,8 +178,7 @@ def run_snapshot() -> None:
         f"[paper/snapshot] {len(open_pos)} open, "
         f"${deployed_aud:.0f} deployed, "
         f"{len(closed_pnls)} closed "
-        f"(expectancy {exp_str}, win rate {wr_str}), "
-        f"{trades_needed} trades until graduation review"
+        f"(expectancy {exp_str}, win rate {wr_str})"
     )
 
     # Portfolio-level "vs market" read. Once real money is live, split the open
@@ -176,3 +212,14 @@ def run_snapshot() -> None:
             book_pct, spy_pct = bench
             print(f"[paper/snapshot] open book {book_pct:+.1f}% vs SPY {spy_pct:+.1f}% "
                   f"(same entries, AUD) -> alpha {book_pct - spy_pct:+.1f}%")
+
+    # The realised record, and the gate that actually decides graduation.
+    live_closes = [p for p in strategy_closes if p.get("broker") == "alpaca"]
+    _print_realised("LIVE (real money)", live_closes)
+    if len(live_closes) >= GRADUATION_MIN_LIVE_CLOSES:
+        print(f"[paper/snapshot] ⚑ GRADUATION REVIEW DUE — {len(live_closes)} "
+              f"real-money closes (gate {GRADUATION_MIN_LIVE_CLOSES})")
+    else:
+        print(f"[paper/snapshot] {GRADUATION_MIN_LIVE_CLOSES - len(live_closes)} "
+              f"more real-money closes until graduation review "
+              f"({len(live_closes)}/{GRADUATION_MIN_LIVE_CLOSES})")

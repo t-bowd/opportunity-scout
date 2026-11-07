@@ -492,6 +492,80 @@ def _check_hold_sweep_shape():
     assert rha.REQUIRED_PATH_DAYS >= rha.MAX_SWEEP_DAYS + rha.TIME_EXIT_REPRIEVE_DAYS
 check("run_hold_analysis sweep fits inside the required price path", _check_hold_sweep_shape)
 
+
+# --- 7. Snapshot: the realised ledger and the graduation gate -------------------
+
+from paper_trader import snapshot as snap
+
+# The real-money ledger as at 2026-11-06, read off the broker/reconcile CLOSED
+# lines in the daily run logs. Frozen fixture: it pins the formatter's arithmetic
+# against a record derived independently of this code, so a regression in the
+# split shows up as a diff against known-good numbers rather than against itself.
+_LIVE_LEDGER_2026_11_06 = [
+    ("stop_loss", -24.01), ("stop_loss", -23.78), ("stop_loss", -23.75),
+    ("stop_loss", -25.97), ("stop_loss", -27.73), ("stop_loss", -24.74),
+    ("stop_loss", -21.88), ("stop_loss", -20.93), ("stop_loss", -16.11),
+    ("stop_loss", -23.71), ("stop_loss", -24.75), ("stop_loss", -14.28),
+    ("stop_loss", -48.81), ("stop_loss", -20.70),
+    ("time_exit", -11.33), ("time_exit", -2.91), ("time_exit", 9.22),
+    ("time_exit", -5.00), ("time_exit", 7.06), ("time_exit", 9.28),
+    ("trailing_stop", 36.06),
+]
+
+
+def _closes(rows, broker="alpaca", status="closed"):
+    return [{"pnl_aud": pnl, "exit_reason": reason, "broker": broker, "status": status}
+            for reason, pnl in rows]
+
+
+def _realised_lines(closes):
+    import contextlib, io
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        snap._print_realised("LIVE", closes)
+    return buf.getvalue().strip().splitlines()
+
+
+def _check_realised_ledger():
+    lines = _realised_lines(_closes(_LIVE_LEDGER_2026_11_06))
+    assert len(lines) == 2, lines
+    # 21 closes, 4 winners, -$298.77 total -> -$14.23 a trade.
+    assert "21 closed, 19% win, $-299 total, expectancy $-14.23" in lines[0], lines[0]
+    # Worst reason first: stops are the whole loss, the two run-it-out exits are ahead.
+    assert lines[1].endswith(
+        "stop_loss 14× 0w $-341  time_exit 6× 3w $+6  trailing_stop 1× 1w $+36"
+    ), lines[1]
+check("snapshot._print_realised splits by exit reason, worst first", _check_realised_ledger)
+
+
+def _check_realised_edges():
+    # No live closes yet -> silent, not a divide-by-zero.
+    assert _realised_lines([]) == []
+    # A row with no exit_reason must bucket, not raise.
+    lines = _realised_lines([{"pnl_aud": -5.0, "exit_reason": None, "broker": "alpaca"}])
+    assert "unknown 1× 0w $-5" in lines[1], lines[1]
+    # pnl_aud can arrive as a Decimal/str from postgrest — the formatter coerces.
+    lines = _realised_lines([{"pnl_aud": "12.60", "exit_reason": "time_exit"}])
+    assert "1 closed, 100% win, $+13 total" in lines[0], lines[0]
+check("snapshot._print_realised edges (empty, no reason, string pnl)", _check_realised_edges)
+
+
+def _check_graduation_gate():
+    # The gate counts the LIVE book only. Sim closes and manual interventions
+    # must not advance it — counting every close is what made it a dead
+    # instrument, printing "0 trades until" forever once the book passed 20.
+    rows = [("stop_loss", -1.0)] * 3
+    mixed = (_closes(rows, broker="alpaca")
+             + _closes(rows, broker="sim")
+             + _closes(rows, broker="alpaca", status="closed_manual"))
+    strategy = [p for p in mixed if p.get("status") != "closed_manual"]
+    live = [p for p in strategy if p.get("broker") == "alpaca"]
+    assert len(strategy) == 6 and len(live) == 3, (len(strategy), len(live))
+    # The gate is a real threshold, and it sits below the 21 closes already banked
+    # (so the live book reads DUE rather than counting down forever).
+    assert snap.GRADUATION_MIN_LIVE_CLOSES > 0
+    assert len(_LIVE_LEDGER_2026_11_06) >= snap.GRADUATION_MIN_LIVE_CLOSES
+check("snapshot graduation gate counts real-money closes only", _check_graduation_gate)
+
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")
     raise SystemExit(1)
