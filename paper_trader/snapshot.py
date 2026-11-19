@@ -162,11 +162,11 @@ def _print_since_inception(label: str, inception: dict,
     record and call it performance. Today's AUD value is printed alongside for
     reconciliation against the rest of the book, nothing more.
     """
-    invested = inception["start_equity"] + inception["net_flows_usd"]
+    pct = inception.get("return_pct")
+    if pct is None:
+        return      # withdrawn to nothing — no capital base to divide by
+    invested = inception["invested_usd"]
     equity = inception["equity"]
-    if invested <= 0:
-        return
-    pct = (equity / invested - 1) * 100
 
     # With no transfers the percentage is exact. With them, daily bars don't say
     # WHEN the cash landed, so the denominator assumes it was there from day one:

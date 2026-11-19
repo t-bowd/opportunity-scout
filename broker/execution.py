@@ -111,11 +111,17 @@ def _parse_inception(hist: dict) -> dict | None:
             except (TypeError, ValueError):
                 continue
 
+    # Derived here, not at each call site: the capital base is start_equity PLUS
+    # later transfers, and getting that denominator wrong is the whole trap this
+    # function exists to avoid. One definition, one place to test it.
+    invested = round(start_equity + flows, 2)
     return {
         "start_date": _day(start_ts).isoformat(),
         "start_equity": round(start_equity, 2),
         "equity": round(equity, 2),
         "net_flows_usd": round(flows, 2),
+        "invested_usd": invested,
+        "return_pct": round((equity / invested - 1) * 100, 2) if invested > 0 else None,
         "days": (_day(end_ts) - _day(start_ts)).days,
     }
 

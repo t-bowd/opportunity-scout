@@ -257,6 +257,17 @@ def _check_parse_inception():
     later = pi({"timestamp": ts, "equity": [0, 0, 1000.0, 1500.0, 1400.0],
                 "cashflow": {"CSD": [0, 0, 1000.0, 500.0, 0], "CSW": [0, 0, 0, 0, -50.0]}})
     assert later["net_flows_usd"] == 450.0, later
+    # The capital base is start + later transfers, NOT start alone: $1,450 in,
+    # $1,400 out = -3.4%, where Alpaca's own equity/base_value - 1 would say +40%
+    # by counting the deposit as profit.
+    assert later["invested_usd"] == 1450.0, later
+    assert later["return_pct"] == -3.45, later
+    # No transfers -> the base is just the opening equity and the % is exact.
+    assert got["invested_usd"] == 1000.0 and got["return_pct"] == -20.0, got
+    # Withdrawn to nothing -> no base to divide by, and no fabricated percentage.
+    emptied = pi({"timestamp": ts, "equity": [0, 0, 1000.0, 500.0, 1.0],
+                  "cashflow": {"CSW": [0, 0, 0, 0, -1000.0]}})
+    assert emptied["invested_usd"] == 0.0 and emptied["return_pct"] is None, emptied
 
     # Unusable payloads yield None, never a bogus number.
     assert pi({}) is None
@@ -614,7 +625,8 @@ def _inception_lines(inception, benchmarks, fx=0.80):
 
 def _check_since_inception():
     clean = {"start_date": "2026-08-04", "start_equity": 1000.0, "equity": 800.0,
-             "net_flows_usd": 0.0, "days": 107}
+             "net_flows_usd": 0.0, "invested_usd": 1000.0, "return_pct": -20.0,
+             "days": 107}
     lines = _inception_lines(clean, [("SPY", 5.0), ("IWM", 10.0)])
     assert len(lines) == 2, lines
     # USD is the account's own currency; the AUD value is reconciliation only.
@@ -629,7 +641,8 @@ check("snapshot since-inception return + alpha vs SPY/IWM", _check_since_incepti
 
 def _check_since_inception_edges():
     base = {"start_date": "2026-08-04", "start_equity": 1000.0, "equity": 1800.0,
-            "net_flows_usd": 500.0, "days": 107}
+            "net_flows_usd": 500.0, "invested_usd": 1500.0, "return_pct": 20.0,
+            "days": 107}
     # A later deposit must NOT be reported as profit: $1,500 in, $1,800 out = +20%,
     # not the +80% Alpaca's own profit_loss_pct would give (equity/base_value - 1).
     lines = _inception_lines(base, [("SPY", 5.0)])
@@ -642,9 +655,8 @@ def _check_since_inception_edges():
     assert len(_inception_lines(base, [("SPY", None), ("IWM", None)])) == 1
     # No FX -> drop the AUD reconciliation rather than crash on a None divide.
     assert "AUD" not in _inception_lines(base, [], fx=None)[0]
-    # A withdrawal that empties the account can't be divided by -> silent.
-    assert _inception_lines({**base, "start_equity": 1000.0, "equity": 0.0,
-                             "net_flows_usd": -1000.0}, []) == []
+    # No capital base (withdrawn to nothing) -> silent, not a fabricated figure.
+    assert _inception_lines({**base, "invested_usd": 0.0, "return_pct": None}, []) == []
 check("snapshot since-inception edges (transfers, no bench, no fx)", _check_since_inception_edges)
 
 if failures:
