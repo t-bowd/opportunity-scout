@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 
 import requests
 
+from broker import execution as broker_execution
 from db.client import (
     get_open_paper_positions,
     get_closed_paper_positions,
@@ -134,6 +135,62 @@ def _print_realised(label: str, closes: list[dict]) -> None:
     print(f"[paper/snapshot] {label} by exit: {split}")
 
 
+def _bench_return_pct(hist: list[tuple[date, float]], now_price: float | None,
+                      start: date) -> float | None:
+    """Simple price return of a benchmark from `start` to today, in its own currency."""
+    entry = _close_on_or_before(hist, start)
+    if not entry or not now_price:
+        return None
+    return (now_price / entry - 1) * 100
+
+
+def _print_since_inception(label: str, inception: dict,
+                           benchmarks: list[tuple[str, float | None]],
+                           fx_rate: float | None) -> None:
+    """Total return on the capital actually put into the account.
+
+    Every other read in this file is per-position alpha, which answers "did each
+    pick beat the market while we held it". It cannot answer "where would I be if
+    I'd just bought the index", because a book of individually-respectable
+    positions can still have lost money overall — the losers leave the book and
+    stop being counted, the benchmark comparison resets with each new entry, and
+    the open-book line only ever describes the survivors. That gap is exactly
+    where a strategy hides, and it's the number the graduation decision turns on.
+
+    USD, not AUD. The account is denominated in USD and no conversion ever
+    happened, so an AUD figure would fold the currency's move into the strategy's
+    record and call it performance. Today's AUD value is printed alongside for
+    reconciliation against the rest of the book, nothing more.
+    """
+    invested = inception["start_equity"] + inception["net_flows_usd"]
+    equity = inception["equity"]
+    if invested <= 0:
+        return
+    pct = (equity / invested - 1) * 100
+
+    # With no transfers the percentage is exact. With them, daily bars don't say
+    # WHEN the cash landed, so the denominator assumes it was there from day one:
+    # that understates a late deposit's return and overstates a late withdrawal's.
+    # The dollar profit is exact either way, so lead with it when it's in doubt.
+    flows = inception["net_flows_usd"]
+    moved = f" ({flows:+,.0f} USD net transfers)" if abs(flows) >= 1 else ""
+    caveat = (f" (profit ${equity - invested:+,.0f}; % approximate — transfer timing unknown)"
+              if abs(flows) >= 1 else "")
+    aud = f" (${equity / fx_rate:,.0f} AUD)" if fx_rate else ""
+
+    print(f"[paper/snapshot] {label} on capital: ${inception['start_equity']:,.0f} in"
+          f"{moved} -> ${equity:,.0f} USD{aud} = {pct:+.1f}%{caveat} "
+          f"since {inception['start_date']} ({inception['days']}d)")
+
+    usable = [(name, b) for name, b in benchmarks if b is not None]
+    if not usable:
+        return
+    print(f"[paper/snapshot] {label} vs market over the same days: "
+          + "  ".join(f"{name} {b:+.1f}%" for name, b in usable)
+          + "  ->  alpha "
+          + "  ".join(f"{name} {pct - b:+.1f}%" for name, b in usable))
+
+
 def run_snapshot() -> None:
     today = date.today()
     open_pos = get_open_paper_positions()
@@ -216,6 +273,19 @@ def run_snapshot() -> None:
     # The realised record, and the gate that actually decides graduation.
     live_closes = [p for p in strategy_closes if p.get("broker") == "alpaca"]
     _print_realised("LIVE (real money)", live_closes)
+
+    # Total return on the money actually put in. The per-position lines above can
+    # read respectably while the account is down — this is the line that says so,
+    # and the one the graduation review should turn on. IWM as well as SPY: the
+    # book skews small, so SPY alone flatters or punishes it for size, not skill.
+    inception = broker_execution.account_since_inception_usd()
+    if inception:
+        start = date.fromisoformat(inception["start_date"])
+        _print_since_inception("LIVE (real money)", inception, [
+            ("SPY", _bench_return_pct(spy_hist, spy_now, start)),
+            ("IWM", _bench_return_pct(_daily_closes("IWM"), _fetch_price("IWM"), start)),
+        ], fx)
+
     if len(live_closes) >= GRADUATION_MIN_LIVE_CLOSES:
         print(f"[paper/snapshot] ⚑ GRADUATION REVIEW DUE — {len(live_closes)} "
               f"real-money closes (gate {GRADUATION_MIN_LIVE_CLOSES})")

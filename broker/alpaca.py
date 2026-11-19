@@ -54,6 +54,29 @@ class AlpacaClient:
         """Market clock — `is_open` gates order submission (SPEC.md §5)."""
         return self._request("GET", "/v2/clock")
 
+    def get_portfolio_history(self, period: str = "1A", timeframe: str = "1D") -> dict:
+        """Daily equity curve for the account, plus the cash that moved in and out.
+
+        /v2/account is a point-in-time read: it says what the account is worth,
+        never what it has *done*. This is the only endpoint carrying the starting
+        value and the curve between, which is what "total return on the money
+        actually put in" needs.
+
+        `cashflow_types=ALL` is not optional for that question. Alpaca defines
+        profit_loss_pct as `equity / base_value - 1` with no adjustment for
+        transfers, so funding the account again is reported as profit. The
+        cashflow series is what lets the caller subtract the deposit back out.
+
+        `period` takes number+unit (D/W/M/A) — there is no "all", so the default
+        is a year, comfortably longer than this account's life. Periods over 30
+        days accept only the 1D timeframe.
+        """
+        return self._request("GET", "/v2/account/portfolio/history", params={
+            "period": period,
+            "timeframe": timeframe,
+            "cashflow_types": "ALL",
+        })
+
     # --- orders ------------------------------------------------------------
     def submit_market_buy(self, symbol: str, qty: int, client_order_id: str) -> dict:
         return self._request("POST", "/v2/orders", json={

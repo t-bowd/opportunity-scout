@@ -228,7 +228,45 @@ def _check_broker_fail_soft():
     assert bexec.arm_trailing({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
     assert bexec.time_exit({"ticker": "AAPL", "quantity": 5, "id": "p1"}) is None
     assert bexec.account_cash_equity_usd() is None   # no account when disabled
+    assert bexec.account_since_inception_usd() is None
 check("broker disabled without keys — all ops no-op", _check_broker_fail_soft)
+
+def _check_parse_inception():
+    pi = bexec._parse_inception
+    from datetime import datetime as _dt, timezone as _tz
+    day = 86400
+    # Derived, not hard-coded: a stale epoch literal fails the date assertion for
+    # a reason that has nothing to do with the code under test.
+    t0 = int(_dt(2026, 8, 4, tzinfo=_tz.utc).timestamp())
+    ts = [t0 - 2 * day, t0 - day, t0, t0 + day, t0 + 2 * day]
+    # Two zero-equity days before funding: the account wasn't invested yet, so
+    # dating the book from them would hand the benchmark a free head start.
+    got = pi({"timestamp": ts, "equity": [0, 0, 1000.0, 900.0, 800.0]})
+    assert got["start_date"] == "2026-08-04", got
+    assert (got["start_equity"], got["equity"], got["days"]) == (1000.0, 800.0, 2), got
+    assert got["net_flows_usd"] == 0.0, got
+
+    # The deposit that FUNDED the account lands on day one and already is
+    # start_equity. Counting it again nets the opening balance to zero.
+    same_day = pi({"timestamp": ts, "equity": [0, 0, 1000.0, 900.0, 800.0],
+                   "cashflow": {"CSD": [0, 0, 1000.0, 0, 0]}})
+    assert same_day["net_flows_usd"] == 0.0, same_day
+    assert same_day["start_equity"] == 1000.0, same_day
+
+    # A LATER deposit is real new capital and must be subtracted from the gain.
+    later = pi({"timestamp": ts, "equity": [0, 0, 1000.0, 1500.0, 1400.0],
+                "cashflow": {"CSD": [0, 0, 1000.0, 500.0, 0], "CSW": [0, 0, 0, 0, -50.0]}})
+    assert later["net_flows_usd"] == 450.0, later
+
+    # Unusable payloads yield None, never a bogus number.
+    assert pi({}) is None
+    assert pi({"timestamp": ts, "equity": [1.0]}) is None          # length mismatch
+    assert pi({"timestamp": ts, "equity": [0, 0, 0, 0, 0]}) is None  # never funded
+    assert pi({"timestamp": ts[:1], "equity": [100.0]}) is None     # one point
+    # postgrest/JSON can hand back strings and nulls in the series.
+    coerced = pi({"timestamp": ts, "equity": [None, "0", "1000.0", None, "800.0"]})
+    assert (coerced["start_equity"], coerced["equity"]) == (1000.0, 800.0), coerced
+check("broker._parse_inception dates from funding, nets later flows only", _check_parse_inception)
 
 def _check_atr_pct():
     ap = entry._atr_pct
@@ -565,6 +603,49 @@ def _check_graduation_gate():
     assert snap.GRADUATION_MIN_LIVE_CLOSES > 0
     assert len(_LIVE_LEDGER_2026_11_06) >= snap.GRADUATION_MIN_LIVE_CLOSES
 check("snapshot graduation gate counts real-money closes only", _check_graduation_gate)
+
+
+def _inception_lines(inception, benchmarks, fx=0.80):
+    import contextlib, io
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        snap._print_since_inception("LIVE", inception, benchmarks, fx)
+    return buf.getvalue().strip().splitlines()
+
+
+def _check_since_inception():
+    clean = {"start_date": "2026-08-04", "start_equity": 1000.0, "equity": 800.0,
+             "net_flows_usd": 0.0, "days": 107}
+    lines = _inception_lines(clean, [("SPY", 5.0), ("IWM", 10.0)])
+    assert len(lines) == 2, lines
+    # USD is the account's own currency; the AUD value is reconciliation only.
+    assert lines[0] == ("[paper/snapshot] LIVE on capital: $1,000 in -> $800 USD "
+                        "($1,000 AUD) = -20.0% since 2026-08-04 (107d)"), lines[0]
+    # The whole point of the line: down 20% while the market rose is -25% alpha,
+    # a figure no per-position comparison in this file can produce.
+    assert lines[1] == ("[paper/snapshot] LIVE vs market over the same days: "
+                        "SPY +5.0%  IWM +10.0%  ->  alpha SPY -25.0%  IWM -30.0%"), lines[1]
+check("snapshot since-inception return + alpha vs SPY/IWM", _check_since_inception)
+
+
+def _check_since_inception_edges():
+    base = {"start_date": "2026-08-04", "start_equity": 1000.0, "equity": 1800.0,
+            "net_flows_usd": 500.0, "days": 107}
+    # A later deposit must NOT be reported as profit: $1,500 in, $1,800 out = +20%,
+    # not the +80% Alpaca's own profit_loss_pct would give (equity/base_value - 1).
+    lines = _inception_lines(base, [("SPY", 5.0)])
+    assert "(+500 USD net transfers)" in lines[0], lines[0]
+    assert "= +20.0%" in lines[0], lines[0]
+    assert "profit $+300" in lines[0] and "transfer timing unknown" in lines[0], lines[0]
+    assert "alpha SPY +15.0%" in lines[1], lines[1]
+
+    # No benchmark data (Yahoo down) -> the capital line still prints alone.
+    assert len(_inception_lines(base, [("SPY", None), ("IWM", None)])) == 1
+    # No FX -> drop the AUD reconciliation rather than crash on a None divide.
+    assert "AUD" not in _inception_lines(base, [], fx=None)[0]
+    # A withdrawal that empties the account can't be divided by -> silent.
+    assert _inception_lines({**base, "start_equity": 1000.0, "equity": 0.0,
+                             "net_flows_usd": -1000.0}, []) == []
+check("snapshot since-inception edges (transfers, no bench, no fx)", _check_since_inception_edges)
 
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")

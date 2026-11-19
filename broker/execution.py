@@ -14,7 +14,7 @@ resting exit order, so reconciliation only has to watch that one id.
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 
 from broker import alpaca, config
 
@@ -53,6 +53,87 @@ def account_cash_equity_usd() -> tuple[float, float] | None:
         return float(a["cash"]), float(a["portfolio_value"])
     except (alpaca.BrokerError, KeyError, ValueError) as e:
         print(f"[broker] account cash/equity fetch failed (soft): {e}")
+        return None
+
+
+def _day(epoch_seconds: int) -> date:
+    return datetime.fromtimestamp(int(epoch_seconds), tz=timezone.utc).date()
+
+
+def _parse_inception(hist: dict) -> dict | None:
+    """Reduce a portfolio-history payload to the since-inception facts.
+
+    Pure, so the arithmetic is testable without a broker. Returns
+    {start_date, start_equity, equity, net_flows_usd, days} in USD, or None when
+    the payload is too thin to say anything.
+
+    "Inception" is the first day the account held anything: the zero-equity days
+    before funding are not part of the record, and dating the book from them
+    would compare the strategy against a benchmark it wasn't invested in yet.
+
+    Flows are counted only STRICTLY AFTER that first funded day. The deposit that
+    funded the account lands on day one and already *is* start_equity, so
+    counting it again would net the opening balance to zero and report an
+    infinite return. Later deposits are genuine additions to capital.
+    """
+    ts = hist.get("timestamp") or []
+    eq = hist.get("equity") or []
+    if len(ts) != len(eq) or len(ts) < 2:
+        return None
+
+    funded = []
+    for t, e in zip(ts, eq):
+        if e is None or e == "":
+            continue
+        try:
+            value = float(e)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            funded.append((t, value))
+    if len(funded) < 2:
+        return None
+
+    start_ts, start_equity = funded[0]
+    end_ts, equity = funded[-1]
+
+    # Alpaca's own docs call the cashflow arrays "accumulated" but ship an
+    # example that isn't monotonic, so read them as per-window amounts and sum.
+    # Over-counting here would understate the return, which is the safe direction
+    # for a number used to decide whether real money keeps running.
+    flows = 0.0
+    for series in (hist.get("cashflow") or {}).values():
+        for t, amount in zip(ts, series or []):
+            if t <= start_ts or not amount:
+                continue
+            try:
+                flows += float(amount)
+            except (TypeError, ValueError):
+                continue
+
+    return {
+        "start_date": _day(start_ts).isoformat(),
+        "start_equity": round(start_equity, 2),
+        "equity": round(equity, 2),
+        "net_flows_usd": round(flows, 2),
+        "days": (_day(end_ts) - _day(start_ts)).days,
+    }
+
+
+def account_since_inception_usd() -> dict | None:
+    """What the account has done since the money went in — see _parse_inception.
+
+    None when the broker is disabled, unreachable, or the history is unusable.
+    Fails soft: this line is instrumentation, and losing it must never cost the
+    snapshot the rest of its output.
+    """
+    cli = alpaca.client()
+    if cli is None:
+        return None
+    try:
+        return _parse_inception(cli.get_portfolio_history())
+    except (alpaca.BrokerError, KeyError, ValueError, TypeError) as e:
+        print(f"[broker] portfolio history fetch failed (soft): {e}")
         return None
 
 
