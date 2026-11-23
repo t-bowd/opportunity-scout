@@ -659,6 +659,29 @@ def _check_since_inception_edges():
     assert _inception_lines({**base, "invested_usd": 0.0, "return_pct": None}, []) == []
 check("snapshot since-inception edges (transfers, no bench, no fx)", _check_since_inception_edges)
 
+# --- 8. Graduation review: the benchmark currency leg ---------------------------
+
+import run_graduation_review as grad
+
+def _check_bench_leg_aud():
+    bl = grad.bench_leg_aud
+    # Index flat, AUD flat -> nothing happened.
+    assert bl(100.0, 100.0, 0.70, 0.70) == 0.0
+    # Index +10%, AUD flat -> +10% for an AUD investor too.
+    assert abs(bl(100.0, 110.0, 0.70, 0.70) - 10.0) < 1e-9
+    # Index flat, AUD WEAKENS 0.70 -> 0.63: a US holding is worth MORE in AUD.
+    # fx0/fx1 = 1.111 -> +11.1%. Inverting this is the bug the test exists for:
+    # it would report -10% and turn a currency tailwind into underperformance.
+    assert abs(bl(100.0, 100.0, 0.70, 0.63) - 11.1111) < 1e-3
+    # Index flat, AUD STRENGTHENS 0.63 -> 0.70 -> a US holding loses in AUD.
+    assert bl(100.0, 100.0, 0.63, 0.70) < 0
+    # Missing or zero inputs yield None, never a divide-by-zero or a fake 0%.
+    for args in ((None, 110.0, 0.7, 0.7), (100.0, None, 0.7, 0.7),
+                 (100.0, 110.0, None, 0.7), (100.0, 110.0, 0.7, None),
+                 (0.0, 110.0, 0.7, 0.7), (100.0, 110.0, 0.7, 0.0)):
+        assert bl(*args) is None, args
+check("graduation review benchmark leg carries the FX move", _check_bench_leg_aud)
+
 if failures:
     print(f"\nSMOKE FAILED — {len(failures)} issue(s)")
     raise SystemExit(1)
