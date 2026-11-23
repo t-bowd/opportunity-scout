@@ -24,10 +24,11 @@ load_dotenv(".env.local")
 
 import statistics
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 from db.client import get_client
 from broker import execution as broker_execution
+from paper_trader.exit import MAX_HOLD_DAYS_BY_PATTERN, DEFAULT_MAX_HOLD_DAYS
 from paper_trader.snapshot import GRADUATION_MIN_LIVE_CLOSES
 
 # Reused rather than reimplemented: these already handle the awkward parts (gap
@@ -268,8 +269,83 @@ def _section_stops(live: list[dict]) -> None:
         print(f"\n  everything NOT stopped out: {_stats([p['pnl_aud'] for p in ran])}")
 
 
+def _section_stop_counterfactual(live: list[dict]) -> None:
+    """Were the stops right? Compare each one against leaving the position alone.
+
+    This is the section that settles whether the exits or the entries are the
+    problem, and it is the one figure the ledger genuinely cannot imply. A book
+    whose stops fired on noise and a book whose stops fired on real declines have
+    identical ledgers — 15 stops, no winners, same dollars — and opposite fixes.
+    The first wants a wider stop or none; the second wants better picks and would
+    be made worse by widening, because every extra point of room is spent.
+
+    Priced in USD throughout: a stop decision is about the stock, and routing it
+    through AUD would mix the currency into a question that has nothing to do
+    with it.
+    """
+    _hr("5. WERE THE STOPS RIGHT? — realised vs leaving the position alone")
+    stops = [p for p in live if p["reason"] == "stop_loss" and p["entry"] and p["us"]]
+    if not stops:
+        print("no live stops.")
+        return
+
+    print(f"  {'tkr':7} {'entry':11} {'held':>4} {'realised':>9} {'if held':>9} "
+          f"{'diff':>8}  {'':14} {'matured':>7}")
+    saved = cost = wash = 0
+    r_sum = c_sum = 0.0
+    matured_diffs = []
+    today = date.today()
+
+    for p in sorted(stops, key=lambda p: p["entry"]):
+        dates, closes = _bench_series(p["ticker"], lookback_days=400)
+        if not dates:
+            print(f"  {p['ticker']:7} no price history")
+            continue
+        limit = MAX_HOLD_DAYS_BY_PATTERN.get(p["pattern"] or "", DEFAULT_MAX_HOLD_DAYS)
+        target = p["entry"] + timedelta(days=limit)
+        p_entry = _spy_on(dates, closes, p["entry"])
+        p_target = _spy_on(dates, closes, min(target, today))
+        if not p_entry or not p_target:
+            print(f"  {p['ticker']:7} incomplete price history")
+            continue
+
+        held_ret = (p_target / p_entry - 1) * 100
+        # pnl_pct is AUD and held_ret is USD, so the difference carries the
+        # currency move. Over a 2-week stop that is small, but it is the reason
+        # this comparison is reported as a direction and a magnitude, not a
+        # precise dollar counterfactual.
+        diff = held_ret - (p["pnl_pct"] or 0.0)
+        verdict = ("stop SAVED us" if diff < -1 else
+                   "stop COST us" if diff > 1 else "wash")
+        saved += diff < -1
+        cost += diff > 1
+        wash += -1 <= diff <= 1
+        r_sum += p["pnl_pct"] or 0.0
+        c_sum += held_ret
+        matured = target <= today
+        if matured:
+            matured_diffs.append(diff)
+        print(f"  {p['ticker']:7} {str(p['entry']):11} {p['days'] or 0:4} "
+              f"{_pct(p['pnl_pct'], 8)} {_pct(held_ret, 8)} {_pct(diff, 7)}  "
+              f"{verdict:14} {'yes' if matured else 'no':>7}")
+
+    n = saved + cost + wash
+    if not n:
+        return
+    print(f"\n  n={n}   stop SAVED money {saved}x   stop COST money {cost}x   wash {wash}x")
+    print(f"  mean realised {r_sum / n:+.1f}%   mean if left alone {c_sum / n:+.1f}%"
+          f"   -> stop was worth {(r_sum - c_sum) / n:+.1f} pts per trade")
+    if matured_diffs:
+        m = sum(matured_diffs) / len(matured_diffs)
+        print(f"  fully matured only (n={len(matured_diffs)}, no look-ahead): "
+              f"{-m:+.1f} pts per trade")
+    print("\n  'Saved' means the position kept falling after we were stopped out.")
+    print("  If stops mostly SAVED money the exits are working and the ENTRIES are")
+    print("  the problem — and widening the stop spends the saving.")
+
+
 def _section_alpha(live: list[dict]) -> None:
-    _hr("5. PER-POSITION ALPHA — did the picks beat the market while held?")
+    _hr("6. PER-POSITION ALPHA — did the picks beat the market while held?")
     scored = [p for p in live if p["alpha_spy"] is not None]
     if not scored:
         print("no benchmark data.")
@@ -293,7 +369,7 @@ def _section_alpha(live: list[dict]) -> None:
 
 
 def _section_entry_hypothesis(live: list[dict]) -> None:
-    _hr("6. THE ENTRY HYPOTHESIS — buying something that already ran")
+    _hr("7. THE ENTRY HYPOTHESIS — buying something that already ran")
     have = [p for p in live if p["ret_20d"] is not None and p["pnl_pct"] is not None]
     if len(have) < 8:
         print(f"only {len(have)} closed live positions carry ret_20d_at_score "
@@ -320,7 +396,7 @@ def _section_entry_hypothesis(live: list[dict]) -> None:
 
 
 def _section_worst(live: list[dict]) -> None:
-    _hr("7. WHERE THE MONEY WENT — every live close, worst first")
+    _hr("8. WHERE THE MONEY WENT — every live close, worst first")
     print(f"  {'ticker':8} {'exit':11} {'reason':14} {'days':>5} {'ret':>8} "
           f"{'$AUD':>9} {'aIWM':>8} {'score':>5} {'20d':>7}")
     for p in sorted(live, key=lambda p: p["pnl_aud"]):
@@ -344,6 +420,7 @@ def run() -> None:
     _section_ledger(positions)
     _section_trend(live)
     _section_stops(live)
+    _section_stop_counterfactual(live)
     _section_alpha(live)
     _section_entry_hypothesis(live)
     _section_worst(live)
