@@ -169,9 +169,12 @@ def _print_since_inception(label: str, inception: dict,
     equity = inception["equity"]
 
     # With no transfers the percentage is exact. With them, daily bars don't say
-    # WHEN the cash landed, so the denominator assumes it was there from day one:
-    # that understates a late deposit's return and overstates a late withdrawal's.
-    # The dollar profit is exact either way, so lead with it when it's in doubt.
+    # WHEN the cash landed, so the denominator assumes it was there from day one.
+    # That damps the figure TOWARD ZERO for a late deposit — which flatters a loss
+    # and understates a gain — and exaggerates it for a late withdrawal. Worth
+    # being precise about: a reader who assumes the error is conservative will
+    # read a flattered loss as the floor when it's the ceiling. The dollar profit
+    # is exact either way, so lead with it when the percentage is in doubt.
     flows = inception["net_flows_usd"]
     moved = f" ({flows:+,.0f} USD net transfers)" if abs(flows) >= 1 else ""
     caveat = (f" (profit ${equity - invested:+,.0f}; % approximate — transfer timing unknown)"
