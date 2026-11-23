@@ -315,6 +315,24 @@ def _check_stop_pct_for():
     # stop — a tighter stop than before would invert the whole point of the change.
     assert sp(2.5) > float(bcfg.HARD_STOP_PCT), "typical name must get a wider stop than the old flat 12%"
 check("entry._stop_pct_for (ATR-scaled, clamped both ends)", _check_stop_pct_for)
+def _check_min_score_for():
+    ms = entry._min_score_for
+    # THE invariant: a bearish regime must NOT raise the live floor. It used to be
+    # max(BEARISH_MIN_SCORE, LIVE_MIN_SCORE) = max(15, 15), which changed nothing
+    # live and so hid the problem; at a floor of 13 that expression would quietly
+    # push real money back into the band four samples say is the worst one.
+    assert ms(live=True, bearish=True) == ms(live=True, bearish=False), \
+        "the market regime must never raise the live score floor"
+    assert ms(live=True, bearish=True) == entry.LIVE_MIN_SCORE
+    # Paper keeps the regime bump.
+    assert ms(live=False, bearish=True) == entry.BEARISH_MIN_SCORE
+    assert ms(live=False, bearish=False) == entry.MIN_SCORE
+    # Real money must never be held to a STRICTER bar than paper, which is what
+    # cost the live book its only positive band for four months.
+    assert entry.LIVE_MIN_SCORE <= entry.MIN_SCORE, \
+        "live floor above paper's re-excludes the 13-14 band"
+check("entry._min_score_for — regime never raises the live floor", _check_min_score_for)
+
 def _check_live_risk_sized():
     rs = entry._live_risk_sized
     eq = 2000.0

@@ -3,9 +3,12 @@ Evaluates recent top opportunities (last 10 days) and opens paper positions.
 Runs daily after scoring.
 
 Entry filters (all must pass):
-  1.  Score ≥ 13/20 (raised to 15 in a bearish market regime). Lowered from 16
-      once liquidity stopped being a heavy score penalty; the market-cap floor
-      that guards quality now lives at score time in analyzer/score.py.
+  1.  Score ≥ 13/20 — paper and live alike. Paper raises it to 15 in a bearish
+      market regime; LIVE DOES NOT, because the score turned out to be
+      anti-predictive, so a higher bar in a drawdown selects worse names (see
+      LIVE_MIN_SCORE). Lowered from 16 once liquidity stopped being a heavy score
+      penalty; the market-cap floor that guards quality now lives at score time
+      in analyzer/score.py.
   2.  Underlying signal filed within tiered recency window for the pattern
   3.  Fewer than MAX_POSITIONS open positions (hard ceiling). The $5k pool is a
       SOFT cap — once full, only score >= HIGH_CONVICTION_SCORE picks may go over it
@@ -174,12 +177,21 @@ LIVE_MIN_TRADE_AUD = 75.0
 LIVE_MAX_POSITIONS = 13
 LIVE_BASE_POSITION_AUD = 200.0
 LIVE_MAX_SINGLE_NAME_FRAC = 0.25   # never more than 25% of equity in one position
-# Real money gets a higher bar than paper's exploratory MIN_SCORE=13. The 30d
-# study (analysis-baseline-2026-07-27) showed the 13-14 bucket was a coin-flip
-# (+0.5%, 47% win) and smart_money picks averaged -3.3% — the profile that filled
-# the first live book when the top pick went stale over a weekend. 15 excludes the
-# 13-14 bucket while keeping enough names to fill a small book.
-LIVE_MIN_SCORE = 15
+# Real money used to get a HIGHER bar than paper (15 vs 13), on the strength of a
+# single early 30d read in which the 13-14 bucket looked like a coin-flip. Four
+# later samples all say the opposite: the score is ANTI-predictive, 13-14 is the
+# only band with positive alpha, and 17-18 is the worst. Three were forward-return
+# windows (n up to 260, monotonic on both 30d and 90d horizons); the fourth is the
+# realised record, and it is the one that settles it. Over four months the paper
+# book ran at 13 and the live book at 15, on the same code, same strategy, nearly
+# identical sample sizes:
+#     PAPER  23 closed  61% win  +$100  expectancy +$4.37
+#     LIVE   22 closed  18% win  -$314  expectancy -$14.26
+# The 2026-11-23 graduation review also killed the competing explanation — the
+# stops were not ejecting live positions from noise (12 of 15 kept falling after
+# we were stopped out), so the gap is what the two books are ALLOWED TO BUY.
+# A floor of 15 was excluding the only band that has ever worked.
+LIVE_MIN_SCORE = 13
 
 # Entry staggering — max NEW real-money entries per calendar day, across the 3
 # redundant daily runs (see daily.yml). The Aug-2026 live losses were dominated by
@@ -353,6 +365,21 @@ def _market_is_bearish(is_asx: bool) -> bool:
     except Exception:
         pass
     return False  # fail open
+
+
+def _min_score_for(live: bool, bearish: bool) -> int:
+    """The score floor a pick must clear. Pure, so the invariant below is testable.
+
+    THE INVARIANT: the live floor is never raised by the market regime. Raising a
+    score bar is only a defence if a higher score means a better pick, and on this
+    book it means a worse one — so bumping it in a drawdown would steer real money
+    into the worst band exactly when it can least afford it. Paper keeps the bump;
+    it costs nothing there and keeps the mechanism warm for a regime lever that
+    isn't the score.
+    """
+    if live:
+        return LIVE_MIN_SCORE
+    return BEARISH_MIN_SCORE if bearish else MIN_SCORE
 
 
 def _target_position_size(score: int) -> float:
@@ -548,10 +575,13 @@ def run_entries(week_of: str | None = None) -> None:
     # Market regime — compute once per run for each market
     bearish_us = _market_is_bearish(is_asx=False)
     bearish_asx = _market_is_bearish(is_asx=True)
-    if bearish_us:
-        print(f"[paper/entry] US market regime: BEARISH — min score raised to {BEARISH_MIN_SCORE}")
-    if bearish_asx:
-        print(f"[paper/entry] ASX market regime: BEARISH — min score raised to {BEARISH_MIN_SCORE}")
+    # Says "paper only" because that is the truth: the live floor is not raised in a
+    # drawdown (see the score gate below). The old wording claimed a defence the
+    # live book never had, which is worse than having none.
+    for market, is_bear in (("US", bearish_us), ("ASX", bearish_asx)):
+        if is_bear:
+            print(f"[paper/entry] {market} market regime: BEARISH — paper min score "
+                  f"raised to {BEARISH_MIN_SCORE} (live floor unchanged at {LIVE_MIN_SCORE})")
 
     entered = 0
     reviewed = 0   # candidates surfaced for manual assessment (review mode only)
@@ -615,18 +645,20 @@ def run_entries(week_of: str | None = None) -> None:
             skip("smart_money_blocked_live")
             continue
 
-        # 1. Score gate (regime-aware). Live real money gets a higher floor than
-        # paper — never below LIVE_MIN_SCORE regardless of regime.
+        # 1. Score gate. The live floor stands ALONE and is deliberately NOT raised
+        # in a drawdown. Raising a score bar is only a defence if a higher score
+        # means a better pick, and on this book it means a worse one — so a bearish
+        # bump would steer real money into the worst band precisely when it can
+        # least afford it. It was previously max(BEARISH_MIN_SCORE, LIVE_MIN_SCORE)
+        # = max(15, 15), which changed nothing live and so hid the problem; at a
+        # floor of 13 the same expression would have started doing real damage.
+        # Paper keeps the regime bump — it costs nothing there and the mechanism is
+        # worth keeping warm for a regime lever that isn't the score.
         bearish = bearish_asx if is_asx else bearish_us
-        min_score = BEARISH_MIN_SCORE if bearish else MIN_SCORE
-        if live:
-            min_score = max(min_score, LIVE_MIN_SCORE)
+        min_score = _min_score_for(live, bearish)
         if score < min_score:
             gate = f"score_{score}_below_{min_score}"
-            if live and not bearish:
-                gate += "_live"
-            elif bearish:
-                gate += "_bearish_regime"
+            gate += "_live" if live else ("_bearish_regime" if bearish else "")
             skip(gate)
             continue
 
