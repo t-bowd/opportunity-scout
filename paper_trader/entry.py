@@ -135,6 +135,26 @@ ATR_PERIOD = 20
 # noise ejection over a 12-day window.
 STOP_ATR_MULT = 5.0
 STOP_PCT_MIN = 10.0       # floor: a very calm name shouldn't get a spread-tight stop
+# REVERTED 18.0 -> 12.0 on 2026-11-23. The widening was built on the premise that
+# the stop was ejecting positions from noise before the thesis could play out. The
+# graduation review tested that premise directly — for each of the 15 real-money
+# stops, what would the position have returned if left alone to its time limit —
+# and it is false: 12 of 15 KEPT FALLING, mean realised -14.4% against -22.4% if
+# held, and +4.5 pts per trade on the nine where the window has fully elapsed so
+# there is no look-ahead. These were not dips (XGN -16.6% -> -49.3%,
+# NBIS -19.8% -> -38.2%, BORR -18.6% -> -32.1%).
+#
+# So the extra room was not insurance, it was spent: 6 of 6 vol-scaled stops
+# pinned at the 18% ceiling and realised -18.0% where the flat era realised
+# -12.0%, and time-to-stop FELL 18d -> 14d rather than rising. ~$50 across six
+# trades. The evidence points tighter, and 12% is where the evidence stops — we
+# have no data below it, so this is a revert rather than a fresh experiment.
+#
+# Side effect, and a welcome one: at 12% the stop sits well clear of the +20%
+# trail arm, so the collision the comment below worries about is gone and the
+# breakeven ratchet gets a real operating band instead of two points.
+# CAVEAT: 15 stops, all inside a falling market. If a sustained rally produces
+# whipsaw stops on names that then recover, this is the constant to revisit.
 # Ceiling: caps the worst single loss on a wild name, but it ALSO has to stay below
 # exit.TRAILING_STOP_ACTIVATE_PCT (+20%). The breakeven ratchet triggers at the
 # position's own stop distance, so a stop wider than the trail arm would let the
@@ -144,7 +164,7 @@ STOP_PCT_MIN = 10.0       # floor: a very calm name shouldn't get a spread-tight
 # (kept as separate constants rather than a cross-import; the test is the guard).
 # Names needing more than this are too volatile for the main book — that's the
 # sleeve's job — and are sized down accordingly here anyway.
-STOP_PCT_MAX = 18.0
+STOP_PCT_MAX = 12.0
 # Risk ~1.3% of equity per position. Sized so a full book fits the account rather
 # than exhausting cash partway down the queue. In practice positions come in BELOW
 # the theoretical size — whole-share rounding always rounds down (GTLB wanted ~$128

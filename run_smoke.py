@@ -309,11 +309,21 @@ def _check_stop_pct_for():
     # Wild name: 3 x 15% = 45% -> capped so one loss can't be outsized.
     assert sp(15.0) == entry.STOP_PCT_MAX
     # In-band scales with the name's own volatility.
-    assert sp(3.0) == 15.0
-    assert entry.STOP_PCT_MIN <= sp(2.5) <= entry.STOP_PCT_MAX
-    # The multiplier must be calibrated so a TYPICAL name lands above the old flat
-    # stop — a tighter stop than before would invert the whole point of the change.
-    assert sp(2.5) > float(bcfg.HARD_STOP_PCT), "typical name must get a wider stop than the old flat 12%"
+    assert entry.STOP_PCT_MIN <= sp(2.2) <= entry.STOP_PCT_MAX
+    assert sp(2.0) < sp(2.2) < sp(2.4), "must still scale inside the band"
+    # INVERTED 2026-11-23. This previously asserted a typical name must get a stop
+    # WIDER than the old flat 12%, which encoded the September premise that the
+    # stop was ejecting positions from noise. The graduation review tested that
+    # premise against all 15 real-money stops and falsified it — 12 of 15 kept
+    # falling after we were stopped out, so every extra point of room was spent,
+    # not saved. The invariant is now the opposite: volatility must never buy a
+    # position more room than the old flat stop.
+    assert sp(2.5) <= float(bcfg.HARD_STOP_PCT), \
+        "volatility must not buy a wider stop than the old flat 12%"
+    assert entry.STOP_PCT_MAX <= float(bcfg.HARD_STOP_PCT)
+    # Still strictly below the trail arm, so the breakeven ratchet is live code and
+    # the 8% trail never sits inside the stop's own range.
+    assert entry.STOP_PCT_MAX < pexit.TRAILING_STOP_ACTIVATE_PCT
 check("entry._stop_pct_for (ATR-scaled, clamped both ends)", _check_stop_pct_for)
 def _check_min_score_for():
     ms = entry._min_score_for
