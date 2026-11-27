@@ -15,7 +15,15 @@ from google import genai
 from google.genai import types
 from db.client import get_unprocessed_signals, mark_signal_processed
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+# api_version PINNED — see the long note in analyzer/score.py. Same outage hit
+# this module: news signals went unclassified from 2026-11-06 because v1 rejects
+# system_instruction. It was less visible here because EDGAR signals are
+# rule-classified (no LLM), so the "classified N/M" count stayed plausible while
+# every news signal was being skipped.
+client = genai.Client(
+    api_key=os.environ["GEMINI_API_KEY"],
+    http_options=types.HttpOptions(api_version="v1beta"),
+)
 MODEL = "gemini-2.5-flash"
 
 # These sources have pattern already set by the collector — no LLM needed

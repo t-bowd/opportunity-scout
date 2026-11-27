@@ -14,7 +14,20 @@ from db.client import (
     insert_feedback_rows,
 )
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+# api_version is PINNED, not left to the SDK's default. A google-genai release
+# flipped that default from v1beta to v1, and v1 rejects system_instruction with
+# "Developer instruction is not enabled for api version v1" — so every scoring
+# call 400'd from 2026-11-06 to 2026-11-27 (21 days, ~540 signals queued and
+# unscored, the entry stage starved of candidates the whole time). Nothing in this
+# repo changed; the dependency moved underneath it, and requirements.txt had no
+# upper bound so CI picked up the new default silently.
+#
+# The smoke suite cannot catch this: it runs with a fake key and never makes a
+# real call. So the guard is the explicit version here, not a test.
+client = genai.Client(
+    api_key=os.environ["GEMINI_API_KEY"],
+    http_options=types.HttpOptions(api_version="v1beta"),
+)
 MODEL = "gemini-2.5-flash"
 
 PATTERNS_TO_SCORE = {

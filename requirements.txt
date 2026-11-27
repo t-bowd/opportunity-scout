@@ -1,5 +1,10 @@
 supabase==2.10.0
-google-genai>=1.0.0
+# Upper bound added 2026-11-27. >=1.0.0 alone let CI install whatever was newest
+# on the day, and a release flipped the default API version to v1 — which rejects
+# system_instruction and silently killed scoring for 21 days. The real fix is the
+# explicit api_version="v1beta" at both client sites; this bound just stops a major
+# release arriving unannounced on a job nobody watches.
+google-genai>=1.2.0,<2.0.0
 feedparser==6.0.11
 requests==2.32.3
 resend==2.30.1
