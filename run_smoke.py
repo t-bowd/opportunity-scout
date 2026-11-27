@@ -231,6 +231,41 @@ def _check_broker_fail_soft():
     assert bexec.account_since_inception_usd() is None
 check("broker disabled without keys — all ops no-op", _check_broker_fail_soft)
 
+def _check_exit_order_state():
+    eos = bexec._exit_order_state
+
+    class _Cli:
+        def __init__(self, order): self._o = order
+        def get_order(self, oid):
+            if self._o is None:
+                raise balpaca.BrokerError("GET /v2/orders/x -> 404: not found")
+            return self._o
+
+    def st(order, oid="o1"):
+        return eos(_Cli(order), oid)
+
+    # A queued market sell is STILL WORKING — the case that wedged BWMX for four
+    # days. Submitted after the close, it waits hours for the open, and the pre-open
+    # retry used to cancel it and then fail to resubmit.
+    for s_ in ("new", "accepted", "pending_new", "partially_filled", "held"):
+        assert st({"type": "market", "side": "sell", "status": s_}) == "pending_sell", s_
+    # Terminal orders must read "gone", NOT "cancel me": Alpaca answers 422 "not
+    # cancelable" for those and cancel_order only swallows 404, so trying would
+    # abort the submit and keep the position wedged. This is BWMX's current state.
+    for s_ in ("filled", "canceled", "expired", "rejected", "done_for_day"):
+        assert st({"type": "market", "side": "sell", "status": s_}) == "gone", s_
+    # A live stop / trailing stop is not a time exit — cancel it, then sell.
+    assert st({"type": "stop", "side": "sell", "status": "new"}) == "live_other"
+    assert st({"type": "trailing_stop", "side": "sell", "status": "new"}) == "live_other"
+    # ...but a terminal stop is still "gone", not "live_other".
+    assert st({"type": "stop", "side": "sell", "status": "filled"}) == "gone"
+    # Unreadable / vanished order -> "gone", so we submit fresh and self-heal.
+    assert st(None) == "gone"
+    # An UNKNOWN status must read as still-live: guessing "finished" would cancel an
+    # order about to fill, which is the expensive direction to be wrong in.
+    assert st({"type": "market", "side": "sell", "status": "some_new_state"}) == "pending_sell"
+check("broker._exit_order_state — queued sell left alone, dead order not cancelled", _check_exit_order_state)
+
 def _check_parse_inception():
     pi = bexec._parse_inception
     from datetime import datetime as _dt, timezone as _tz

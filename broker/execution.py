@@ -253,29 +253,100 @@ def arm_trailing(position: dict) -> str | None:
         return None
 
 
+# An Alpaca order in one of these states is finished and will never fill. Anything
+# NOT here is still working, so treating the set as the terminal one (rather than
+# listing the live states) fails safe: an unfamiliar status reads as "still live"
+# and we leave it alone instead of cancelling something that was about to fill.
+_TERMINAL_ORDER_STATUSES = frozenset({
+    "filled", "canceled", "cancelled", "expired", "rejected",
+    "done_for_day", "replaced", "suspended", "stopped",
+})
+
+
+def _exit_order_state(cli: alpaca.AlpacaClient, order_id: str) -> str:
+    """Classify a position's currently recorded resting exit order.
+
+      "pending_sell" -> a market SELL still working: the time exit is already in
+                        and waiting for the open. LEAVE IT ALONE. A sell submitted
+                        after the US close is queued for an open up to fourteen
+                        hours away, and the daily job fires 3-5 times in that gap;
+                        cancelling it there is what wedged BWMX for four days.
+      "live_other"   -> a working stop or trailing stop. Cancel before selling.
+      "gone"         -> filled, cancelled, expired, rejected, or unreadable. Do NOT
+                        attempt to cancel it: Alpaca answers 422 "order is not
+                        cancelable" for an already-terminal order, and
+                        cancel_order() only swallows 404, so the raise would abort
+                        the submit and keep the position wedged — which is exactly
+                        the state BWMX is in, since its sell was cancelled by a
+                        later run on the same day.
+
+    One read, three outcomes, because the cancel decision and the resubmit decision
+    both depend on the same fact and must not disagree.
+    """
+    try:
+        order = cli.get_order(order_id)
+    except alpaca.BrokerError:
+        return "gone"
+    if order.get("status") in _TERMINAL_ORDER_STATUSES:
+        return "gone"
+    if order.get("type") == "market" and order.get("side") == "sell":
+        return "pending_sell"
+    return "live_other"
+
+
 def time_exit(position: dict) -> str | None:
-    """Cancel the resting exit and market-sell (calendar exit). Returns the sell
-    order id, or None if disabled / errored.
+    """Cancel the resting exit and market-sell (calendar exit). Returns the order
+    id of the working sell, or None if disabled / errored.
 
     Unlike arm_trailing and move_stop_to_breakeven — which fire exactly once, on the
     run a threshold is crossed — this is RETRIED every run for as long as the position
-    sits past its time limit. So its client_order_id must differ per attempt: a
-    deterministic id meant the first attempt consumed it and Alpaca rejected every
-    later one with 422 "client_order_id must be unique", wedging the position open
-    forever with no way to self-heal (observed on BWFG from 2026-10-11). Stamping the
-    date gives one clean attempt per day, and the prior order is cancelled first, so
-    there is no double-sell risk."""
+    sits past its time limit, which makes the retry itself the hazard.
+
+    Two bugs have come from that, and both are fixed here:
+
+      1. A deterministic client_order_id meant the first attempt consumed it and
+         Alpaca rejected every later one with 422 "client_order_id must be unique"
+         (BWFG, from 2026-10-11). Date-stamping gave ONE attempt per day — but the
+         workflow fires 3-5 times a day, so every run after the first still 422'd.
+         The id is now unique per ATTEMPT.
+      2. Worse, the retry cancelled the pending sell before resubmitting. Submitted
+         after the close, that sell is queued for an open that is hours away, so the
+         pre-open retry destroyed it and then could not replace it. BWMX sat wedged
+         for four days (2026-11-23 to 11-27): one clean submit at ~00:30 UTC, killed
+         at ~01:30 UTC, 422 for the rest of the day, repeat. It also left the
+         position with NO resting order at all, since the stop had been cancelled on
+         the first attempt. A pending sell is now left alone.
+      3. And the recovery path had the same shape of fault: cancelling an ALREADY
+         cancelled order returns 422 "not cancelable", which cancel_order() re-raises
+         because it only swallows 404 — aborting the submit. So a position that had
+         once been wedged by (2) stayed wedged even with (1) and (2) fixed. We now
+         read the order's state first and only cancel what is actually live.
+
+    Cancel still precedes any NEW submit, so there is no double-sell risk. Note that
+    cancel_order() is deliberately NOT made tolerant of 422 instead: arm_trailing and
+    move_stop_to_breakeven cancel a LIVE stop before adding their own sell, and a
+    silently-swallowed failure there would leave two sell orders against the same
+    shares.
+    """
     cli = alpaca.client()
     if cli is None:
         return None
     ticker = position["ticker"]
     qty = int(position["quantity"])
+    existing = position.get("broker_exit_order_id")
     try:
-        if position.get("broker_exit_order_id"):
-            cli.cancel_order(position["broker_exit_order_id"])
+        state = _exit_order_state(cli, existing) if existing else "gone"
+        if state == "pending_sell":
+            # Already working — say so and return the SAME id, so the caller treats
+            # this as a success rather than printing the stuck-position warning.
+            print(f"[broker] {ticker} time exit already resting at the broker "
+                  f"— waiting for the open, not resubmitting")
+            return existing
+        if state == "live_other":
+            cli.cancel_order(existing)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         sell = cli.submit_market_sell(
-            ticker, qty,
-            client_order_id=f"os-time-{position['id']}-{date.today().isoformat()}")
+            ticker, qty, client_order_id=f"os-time-{position['id']}-{stamp}")
         print(f"[broker] {ticker} time exit — market sell submitted")
         return sell["id"]
     except alpaca.BrokerError as e:
